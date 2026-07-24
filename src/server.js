@@ -5,9 +5,10 @@ import rateLimit from "express-rate-limit";
 import { runPublicSearch } from "./search.js";
 import { assess } from "./anthropic.js";
 import { appendCheckRow, appendMarketingConsent, countChecksThisMonth } from "./sheets.js";
-
 const app = express();
-app.use(express.json({ limit: "2mb" }));
+   app.set("trust proxy", 1);
+   app.use(express.json({ limit: "2mb" }));
+
 
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
