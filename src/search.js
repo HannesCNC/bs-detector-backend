@@ -7,18 +7,46 @@
  * up below; add others (Bing Web Search, etc.) following the same shape.
  */
 
-export async function runPublicSearch({ name, company, town }) {
+export async function runPublicSearch({ name, company, town, website }) {
   const provider = process.env.SEARCH_PROVIDER || "serpapi";
   const queryParts = [name, company, town].filter(Boolean);
   const query = queryParts.join(" ");
 
-  if (!query.trim()) return [];
-
-  if (provider === "serpapi") {
-    return searchSerpApi(query);
+  if (provider !== "serpapi") {
+    throw new Error(`Unsupported SEARCH_PROVIDER: ${provider}`);
   }
 
-  throw new Error(`Unsupported SEARCH_PROVIDER: ${provider}`);
+  const results = [];
+
+  if (query.trim()) {
+    const generalResults = await searchSerpApi(query);
+    results.push(...generalResults);
+  }
+
+  // If a website/social link was submitted, run a second targeted search
+  // scoped to that specific domain so we actually check the claimed profile,
+  // rather than relying on a generic name search to happen to surface it.
+  if (website) {
+    try {
+      const hostname = new URL(website.startsWith("http") ? website : `https://${website}`).hostname
+        .replace(/^www\./, "");
+      const siteQuery = [name, `site:${hostname}`].filter(Boolean).join(" ");
+      const siteResults = await searchSerpApi(siteQuery);
+      results.push(...siteResults);
+    } catch (err) {
+      console.warn("Could not parse submitted website for targeted search:", website, err.message);
+    }
+  }
+
+  // Dedupe by link, cap total so the AI step isn't overwhelmed
+  const seen = new Set();
+  const deduped = results.filter((r) => {
+    if (!r.link || seen.has(r.link)) return false;
+    seen.add(r.link);
+    return true;
+  });
+
+  return deduped.slice(0, 12);
 }
 
 async function searchSerpApi(query) {
@@ -35,28 +63,4 @@ async function searchSerpApi(query) {
 
   const res = await fetch(url.toString());
   if (!res.ok) {
-    console.error("SerpAPI error:", res.status, await res.text());
-    return [];
-  }
-
-  const data = await res.json();
-  const organic = data.organic_results || [];
-
-  // TEMP DEBUG LOGGING - remove once search quality is confirmed
-  console.log(`[SEARCH DEBUG] query="${query}" | raw result count=${organic.length}`);
-  organic.slice(0, 8).forEach((r, i) => {
-    console.log(`[SEARCH DEBUG] result ${i + 1}: title="${r.title}" link="${r.link}"`);
-  });
-  if (data.search_metadata) {
-    console.log(`[SEARCH DEBUG] search_metadata.status=${data.search_metadata.status}`);
-  }
-  if (data.error) {
-    console.log(`[SEARCH DEBUG] SerpAPI error field: ${data.error}`);
-  }
-
-  return organic.slice(0, 8).map((r) => ({
-    title: r.title,
-    snippet: r.snippet,
-    link: r.link,
-  }));
-}
+    console.error("SerpAPI error:",
