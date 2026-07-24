@@ -1,0 +1,20 @@
+{
+  "name": "bs-detector-backend",
+  "version": "0.1.0",
+  "description": "Backend for BS Detector public scan tool - receives check requests, runs AI extraction + public search, logs to Google Sheets, returns Green/Yellow result.",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "google-auth-library": "^9.14.1",
+    "googleapis": "^140.0.1",
+    "@anthropic-ai/sdk": "^0.27.0",
+    "express-rate-limit": "^7.4.0"
+  }
+}
