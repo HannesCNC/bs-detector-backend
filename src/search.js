@@ -42,6 +42,18 @@ async function searchSerpApi(query) {
   const data = await res.json();
   const organic = data.organic_results || [];
 
+  // TEMP DEBUG LOGGING - remove once search quality is confirmed
+  console.log(`[SEARCH DEBUG] query="${query}" | raw result count=${organic.length}`);
+  organic.slice(0, 8).forEach((r, i) => {
+    console.log(`[SEARCH DEBUG] result ${i + 1}: title="${r.title}" link="${r.link}"`);
+  });
+  if (data.search_metadata) {
+    console.log(`[SEARCH DEBUG] search_metadata.status=${data.search_metadata.status}`);
+  }
+  if (data.error) {
+    console.log(`[SEARCH DEBUG] SerpAPI error field: ${data.error}`);
+  }
+
   return organic.slice(0, 8).map((r) => ({
     title: r.title,
     snippet: r.snippet,
