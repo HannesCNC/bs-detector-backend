@@ -70,7 +70,7 @@
     const defaultMessages={green:'No obvious reason for escalation was found in the limited public sources checked.',yellow:'Some information warrants clarification or deeper verification before proceeding.'};
     // Set this to your deployed Railway URL, e.g. 'https://bsdetector-backend-production.up.railway.app/api/check'
     // Left as a relative path only works if this HTML is served from the same domain as the backend.
-    const API_ENDPOINT = '/api/check';
+    const API_ENDPOINT = 'https://bs-detector-backend-production.up.railway.app/api/check';
 
     function setLoading(on){loadingCard.classList.toggle('show',on);submitButton.disabled=on;submitButton.textContent=on?'Running check...':'Run public check'}
     function clearStatus(){resultCard.className='result';errorCard.classList.remove('show');document.getElementById('demoBanner').style.display='none'}
