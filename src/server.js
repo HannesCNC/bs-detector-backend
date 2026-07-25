@@ -4,7 +4,7 @@ import cors from "cors";
 import rateLimit from "express-rate-limit";
 import { runPublicSearch } from "./search.js";
 import { assess } from "./anthropic.js";
-import { appendCheckRow, appendMarketingConsent, countChecksThisMonth, recordSubscriptionEvent, getExtraScansThisMonth, isSubscribedThisMonth } from "./sheets.js";
+import { appendCheckRow, appendMarketingConsent, countChecksThisMonth, recordSubscriptionEvent, getExtraScansThisMonth, getExtraSummaryUnlocksThisMonth, isSubscribedThisMonth } from "./sheets.js";
 import { verifyPayFastNotification, buildCheckoutFields } from "./payfast.js";
 import { applyPromoCode } from "./promo.js";
 
@@ -161,6 +161,14 @@ app.post("/api/check", async (req, res) => {
     });
 
     const isPaidSubscriber = await isSubscribedThisMonth(phone);
+    const extraSummaryUnlocks = await getExtraSummaryUnlocksThisMonth(phone);
+    const BASE_FREE_SUMMARIES = Number(process.env.FREE_DETAILED_SUMMARIES_PER_MONTH || 5);
+    const summaryAllowance = BASE_FREE_SUMMARIES + extraSummaryUnlocks;
+    // usedThisMonth is the count BEFORE this request - so this check is the
+    // (usedThisMonth + 1)th of the month. It gets the full summary for free
+    // if it falls within the base+promo allowance, or if the user is a paid
+    // subscriber (who always gets it regardless of count).
+    const includeDetailedSummary = isPaidSubscriber || usedThisMonth < summaryAllowance;
 
     // --- Log to Sheets (audit trail + usage counting) ---
     const ip = req.headers["x-forwarded-for"]?.split(",")[0] || req.socket.remoteAddress;
@@ -196,10 +204,10 @@ app.post("/api/check", async (req, res) => {
       scansRemaining: Math.max(0, totalAllowance - usedThisMonth - 1),
       disclaimer: "This is a limited public-source scan based on the information supplied. It is not a formal background check or legal clearance.",
       isPaidSubscriber,
-      detailedSummary: isPaidSubscriber ? result.detailedSummary : null,
-      upgradePrompt: isPaidSubscriber
+      detailedSummary: includeDetailedSummary ? result.detailedSummary : null,
+      upgradePrompt: includeDetailedSummary
         ? null
-        : "Want the full public-source summary behind this result? Upgrade for a detailed breakdown of everything found.",
+        : "You've used your free detailed summaries for this month. Upgrade for unlimited full summaries, or enter a promo code for 5 more.",
     });
   } catch (err) {
     console.error("Error in /api/check:", err);
