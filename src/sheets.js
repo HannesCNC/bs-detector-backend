@@ -14,6 +14,10 @@ import { google } from "googleapis";
  *
  * Marketing tab:
  *   timestamp | phone | email | marketing_consent | consent_version
+ *
+ * Subscriptions tab (add this tab too, same header-row pattern):
+ *   timestamp | phone | email | payment_status | amount_gross |
+ *   pf_payment_id | item_name
  */
 
 let sheetsClient = null;
@@ -72,6 +76,32 @@ export async function appendMarketingConsent(row) {
   await sheets.spreadsheets.values.append({
     spreadsheetId: process.env.GOOGLE_SHEET_ID,
     range: "Marketing!A:E",
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values },
+  });
+}
+
+/**
+ * Logs a VERIFIED PayFast payment notification (only ever called after
+ * payfast.js has confirmed the notification is genuine - never call this
+ * from unverified webhook data).
+ */
+export async function recordSubscriptionEvent(row) {
+  const sheets = getClient();
+  const values = [[
+    row.timestamp,
+    row.phone || "",
+    row.email || "",
+    row.paymentStatus || "",
+    row.amountGross || "",
+    row.pfPaymentId || "",
+    row.itemName || "",
+  ]];
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: process.env.GOOGLE_SHEET_ID,
+    range: "Subscriptions!A:G",
     valueInputOption: "RAW",
     insertDataOption: "INSERT_ROWS",
     requestBody: { values },
