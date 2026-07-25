@@ -19,6 +19,44 @@ const PAYFAST_VALIDATE_URL = process.env.PAYFAST_SANDBOX === "true"
   ? "https://sandbox.payfast.co.za/eng/query/validate"
   : "https://www.payfast.co.za/eng/query/validate";
 
+const PAYFAST_PROCESS_URL = process.env.PAYFAST_SANDBOX === "true"
+  ? "https://sandbox.payfast.co.za/eng/process"
+  : "https://www.payfast.co.za/eng/process";
+
+/**
+ * Builds the signed field set for a PayFast checkout. The front-end posts
+ * these fields (as a plain HTML form, not fetch/JSON - PayFast expects a
+ * real form submission that redirects the browser) to processUrl.
+ *
+ * custom_str1 carries the phone number through so the ITN webhook later
+ * knows which phone number to mark as subscribed.
+ */
+export function buildCheckoutFields({ phone, amount, itemName, returnUrl, cancelUrl, notifyUrl }) {
+  const fields = {
+    merchant_id: process.env.PAYFAST_MERCHANT_ID,
+    merchant_key: process.env.PAYFAST_MERCHANT_KEY,
+    return_url: returnUrl,
+    cancel_url: cancelUrl,
+    notify_url: notifyUrl,
+    amount: Number(amount).toFixed(2),
+    item_name: itemName,
+    custom_str1: phone,
+  };
+
+  const passphrase = process.env.PAYFAST_PASSPHRASE || "";
+  const paramString = Object.keys(fields)
+    .filter((key) => fields[key] !== undefined && fields[key] !== "")
+    .map((key) => `${key}=${encodeURIComponent(fields[key]).replace(/%20/g, "+")}`)
+    .join("&");
+  const withPassphrase = passphrase
+    ? `${paramString}&passphrase=${encodeURIComponent(passphrase).replace(/%20/g, "+")}`
+    : paramString;
+
+  fields.signature = crypto.createHash("md5").update(withPassphrase).digest("hex");
+
+  return { fields, processUrl: PAYFAST_PROCESS_URL };
+}
+
 /**
  * Recomputes the MD5 signature from the posted fields and compares it to
  * the "signature" field PayFast included. If PAYFAST_PASSPHRASE is set
