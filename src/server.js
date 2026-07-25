@@ -4,8 +4,9 @@ import cors from "cors";
 import rateLimit from "express-rate-limit";
 import { runPublicSearch } from "./search.js";
 import { assess } from "./anthropic.js";
-import { appendCheckRow, appendMarketingConsent, countChecksThisMonth, recordSubscriptionEvent } from "./sheets.js";
+import { appendCheckRow, appendMarketingConsent, countChecksThisMonth, recordSubscriptionEvent, getExtraScansThisMonth } from "./sheets.js";
 import { verifyPayFastNotification } from "./payfast.js";
+import { applyPromoCode } from "./promo.js";
 
 const app = express();
 app.set("trust proxy", 1); // Railway sits behind a proxy; needed for express-rate-limit and accurate client IPs
@@ -86,6 +87,20 @@ app.post(
   }
 );
 
+app.post("/api/redeem-promo", async (req, res) => {
+  try {
+    const { code, phone } = req.body || {};
+    if (!phone) {
+      return res.status(400).json({ success: false, message: "A phone number is required to redeem a code." });
+    }
+    const result = await applyPromoCode({ code, phone });
+    return res.json(result);
+  } catch (err) {
+    console.error("Error in /api/redeem-promo:", err);
+    return res.status(500).json({ success: false, message: "Something went wrong redeeming that code. Please try again shortly." });
+  }
+});
+
 app.post("/api/check", async (req, res) => {
   try {
     const {
@@ -104,12 +119,14 @@ app.post("/api/check", async (req, res) => {
       return res.status(400).json({ error: "Name and a verified phone number are required." });
     }
 
-    // --- Free tier enforcement ---
+    // --- Free tier enforcement (base allowance + any promo-granted extra scans) ---
     const usedThisMonth = await countChecksThisMonth(phone);
-    if (usedThisMonth >= FREE_SCANS_PER_MONTH) {
+    const extraScans = await getExtraScansThisMonth(phone);
+    const totalAllowance = FREE_SCANS_PER_MONTH + extraScans;
+    if (usedThisMonth >= totalAllowance) {
       return res.status(429).json({
         error: "free_tier_exceeded",
-        message: `You've used your ${FREE_SCANS_PER_MONTH} free scans this month. Upgrade to a paid plan for more checks.`,
+        message: `You've used your ${totalAllowance} available scans this month. Upgrade to a paid plan or enter a promo code for more checks.`,
       });
     }
 
@@ -150,7 +167,7 @@ app.post("/api/check", async (req, res) => {
     return res.json({
       status: result.status,
       message: result.message,
-      scansRemaining: Math.max(0, FREE_SCANS_PER_MONTH - usedThisMonth - 1),
+      scansRemaining: Math.max(0, totalAllowance - usedThisMonth - 1),
       disclaimer: "This is a limited public-source scan based on the information supplied. It is not a formal background check or legal clearance.",
     });
   } catch (err) {
