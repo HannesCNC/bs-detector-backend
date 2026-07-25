@@ -20,11 +20,14 @@ import { google } from "googleapis";
  *   pf_payment_id | item_name
  *
  * PromoCodes tab (you create/manage these rows manually):
- *   code | extra_scans | max_redemptions | times_redeemed | expiry_date | active
- *   (active = "yes"/"no" as plain text; expiry_date = YYYY-MM-DD or blank for none)
+ *   code | extra_scans | max_redemptions | times_redeemed | expiry_date | active | code_type
+ *   (active = "yes"/"no" as plain text; expiry_date = YYYY-MM-DD or blank for none;
+ *    code_type = "scans" or "summary" - leave blank for old codes, treated as "scans".
+ *    "scans" codes grant extra checks per month; "summary" codes grant extra
+ *    detailed-summary unlocks per month, beyond the base 5 free ones.)
  *
  * PromoRedemptions tab (the app writes to this automatically, don't edit):
- *   timestamp | phone | code | extra_scans_granted
+ *   timestamp | phone | code | extra_scans_granted | code_type
  */
 
 let sheetsClient = null;
@@ -125,14 +128,14 @@ export async function getPromoCode(code) {
   const sheets = getClient();
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: process.env.GOOGLE_SHEET_ID,
-    range: "PromoCodes!A:F",
+    range: "PromoCodes!A:G",
   });
 
   const rows = res.data.values || [];
   const normalizedCode = code.trim().toLowerCase();
 
   for (let i = 1; i < rows.length; i++) {
-    const [rowCode, extraScans, maxRedemptions, timesRedeemed, expiryDate, active] = rows[i];
+    const [rowCode, extraScans, maxRedemptions, timesRedeemed, expiryDate, active, codeType] = rows[i];
     if ((rowCode || "").trim().toLowerCase() === normalizedCode) {
       return {
         rowNumber: i + 1, // +1 because sheet rows are 1-indexed and this loop is 0-indexed from row 0
@@ -142,6 +145,7 @@ export async function getPromoCode(code) {
         timesRedeemed: Number(timesRedeemed) || 0,
         expiryDate: expiryDate || null,
         active: (active || "").trim().toLowerCase() !== "no",
+        codeType: (codeType || "scans").trim().toLowerCase() === "summary" ? "summary" : "scans",
       };
     }
   }
@@ -161,34 +165,57 @@ export async function incrementPromoRedemption(rowNumber, newCount) {
 
 export async function appendPromoRedemption(row) {
   const sheets = getClient();
-  const values = [[row.timestamp, row.phone || "", row.code || "", row.extraScansGranted || 0]];
+  const values = [[row.timestamp, row.phone || "", row.code || "", row.extraScansGranted || 0, row.codeType || "scans"]];
   await sheets.spreadsheets.values.append({
     spreadsheetId: process.env.GOOGLE_SHEET_ID,
-    range: "PromoRedemptions!A:D",
+    range: "PromoRedemptions!A:E",
     valueInputOption: "RAW",
     insertDataOption: "INSERT_ROWS",
     requestBody: { values },
   });
 }
 
-/** Sums extra scans a phone number has been granted via promo codes this calendar month. */
+/** Sums extra SCAN-type promo grants for a phone this calendar month (blank code_type counts as "scans" for backward compatibility). */
 export async function getExtraScansThisMonth(phone) {
   if (!phone) return 0;
   const sheets = getClient();
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: process.env.GOOGLE_SHEET_ID,
-    range: "PromoRedemptions!A:D",
+    range: "PromoRedemptions!A:E",
   });
 
   const rows = res.data.values || [];
   const now = new Date();
 
   return rows.slice(1).reduce((total, r) => {
-    const [timestamp, rowPhone, , extraScansGranted] = r;
+    const [timestamp, rowPhone, , extraScansGranted, codeType] = r;
     if (rowPhone !== phone) return total;
+    if ((codeType || "scans").trim().toLowerCase() !== "scans") return total;
     const d = new Date(timestamp);
     if (d.getFullYear() !== now.getFullYear() || d.getMonth() !== now.getMonth()) return total;
     return total + (Number(extraScansGranted) || 0);
+  }, 0);
+}
+
+/** Sums extra SUMMARY-unlock promo grants for a phone this calendar month. */
+export async function getExtraSummaryUnlocksThisMonth(phone) {
+  if (!phone) return 0;
+  const sheets = getClient();
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.GOOGLE_SHEET_ID,
+    range: "PromoRedemptions!A:E",
+  });
+
+  const rows = res.data.values || [];
+  const now = new Date();
+
+  return rows.slice(1).reduce((total, r) => {
+    const [timestamp, rowPhone, , extraGranted, codeType] = r;
+    if (rowPhone !== phone) return total;
+    if ((codeType || "").trim().toLowerCase() !== "summary") return total;
+    const d = new Date(timestamp);
+    if (d.getFullYear() !== now.getFullYear() || d.getMonth() !== now.getMonth()) return total;
+    return total + (Number(extraGranted) || 0);
   }, 0);
 }
 
