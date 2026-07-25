@@ -32,8 +32,17 @@ Rules:
 - If search results are sparse or the query is too generic to be meaningful,
   return "yellow" with a message noting the scan was inconclusive due to
   limited identifying information - do not guess.
+- ALSO produce a "detailedSummary": a longer plain-language paragraph (roughly
+  3-6 sentences) listing what the public sources actually show - e.g. company
+  registration status, directory listings found, business names/associations,
+  towns/addresses mentioned - purely descriptive, still fully paraphrased
+  (never quoted), still never alleging wrongdoing. This longer summary is
+  shown only to paying subscribers, but you must always produce it so the
+  system can choose whether to reveal it. If there is genuinely nothing to
+  summarize, detailedSummary can simply restate that no relevant public
+  information was found.
 - Output ONLY valid JSON, no markdown fences, no preamble:
-  {"status": "green" | "yellow", "message": "one sentence, max 220 chars"}`;
+  {"status": "green" | "yellow", "message": "one sentence, max 220 chars", "detailedSummary": "3-6 sentences, max 900 chars"}`;
 
 export async function assess({ name, company, town, phone, website, pastedText, reason, searchResults, submittedLink }) {
   const linkSection = !website
@@ -68,7 +77,7 @@ Return the JSON assessment now.`;
 
   const response = await client.messages.create({
     model: "claude-sonnet-4-6",
-    max_tokens: 300,
+    max_tokens: 600,
     system: SYSTEM_PROMPT,
     messages: [{ role: "user", content: userContent }],
   });
@@ -81,6 +90,9 @@ Return the JSON assessment now.`;
     if (parsed.status !== "green" && parsed.status !== "yellow") {
       throw new Error("invalid status");
     }
+    if (!parsed.detailedSummary) {
+      parsed.detailedSummary = "No additional detail is available for this scan.";
+    }
     return parsed;
   } catch (err) {
     console.error("Failed to parse Claude response:", raw, err);
@@ -88,6 +100,7 @@ Return the JSON assessment now.`;
     return {
       status: "yellow",
       message: "The scan could not be completed reliably - please try again or add more identifying detail.",
+      detailedSummary: "The scan could not be completed reliably - please try again or add more identifying detail.",
     };
   }
 }
