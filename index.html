@@ -25,6 +25,16 @@
       <p>Enter the information you already have. BS Detector runs a limited public-source scan and returns a simple Green or Yellow result.</p>
     </section>
 
+    <section class="card" style="margin-bottom:18px">
+      <div class="cardhead" style="border-bottom:none;padding-bottom:0"><h3>Your details</h3><p>Fill this in once — it stays saved on this device and links each check back to you.</p></div>
+      <div class="form" style="padding-top:14px">
+        <div class="grid two">
+          <div class="field"><label for="yourName">Your name</label><input id="yourName" autocomplete="name" placeholder="e.g. Hannes Richard"></div>
+          <div class="field"><label class="required" for="yourPhone">Your phone number</label><input id="yourPhone" type="tel" required autocomplete="tel" placeholder="e.g. +27 82 123 4567"></div>
+        </div>
+      </div>
+    </section>
+
     <main>
       <section class="card">
         <div class="cardhead"><h3>Run a free quick check</h3><p>Fields marked with an asterisk are required. The free tier includes five scans per month.</p></div>
@@ -33,7 +43,6 @@
             <div class="field span2"><label class="required" for="fullName">Name and surname</label><input id="fullName" required autocomplete="name" placeholder="e.g. Lloyd van Wyk"></div>
             <div class="field"><label for="companyName">Company or trading name</label><input id="companyName" autocomplete="organization" placeholder="e.g. Executive Assets"></div>
             <div class="field"><label for="town">Town</label><input id="town" autocomplete="address-level2" placeholder="e.g. Bronkhorstspruit"></div>
-            <div class="field"><label class="required" for="phone">Phone number</label><input id="phone" type="tel" required autocomplete="tel" placeholder="e.g. +27 82 123 4567"></div>
             <div class="field"><label for="website">Website or social media link</label><input id="website" type="url" placeholder="https://example.com"></div>
             <div class="field span2"><label for="reason">Reason for check</label><select id="reason"><option value="considering_hiring">Considering hiring</option><option value="verifying_quote">Verifying a quote</option><option value="checking_contact">Checking a contact</option><option value="other">Other</option></select></div>
             <div class="field span2"><label for="pastedText">Paste text from a quote, message, email or business profile</label><textarea id="pastedText" placeholder="Paste any relevant text here..."></textarea></div>
@@ -74,20 +83,30 @@
     const API_ENDPOINT = 'https://bs-detector-backend-production.up.railway.app/api/check';
     const PROMO_ENDPOINT = 'https://bs-detector-backend-production.up.railway.app/api/redeem-promo';
 
+    // Persist "Your details" locally on this device so it doesn't need retyping each visit.
+    const yourName=document.getElementById('yourName');
+    const yourPhone=document.getElementById('yourPhone');
+    try{
+      yourName.value=localStorage.getItem('bsdYourName')||'';
+      yourPhone.value=localStorage.getItem('bsdYourPhone')||'';
+    }catch{}
+    yourName.addEventListener('change',()=>{try{localStorage.setItem('bsdYourName',yourName.value.trim())}catch{}});
+    yourPhone.addEventListener('change',()=>{try{localStorage.setItem('bsdYourPhone',yourPhone.value.trim())}catch{}});
+
     function setLoading(on){loadingCard.classList.toggle('show',on);submitButton.disabled=on;submitButton.textContent=on?'Running check...':'Run public check'}
     function clearStatus(){resultCard.className='result';errorCard.classList.remove('show');document.getElementById('demoBanner').style.display='none'}
     function showResult(status,message,isDemo){const safe=status==='yellow'?'yellow':'green';lastResult=isDemo?null:{status:safe,message:message||defaultMessages[safe],name:fullName.value.trim(),company:companyName.value.trim()};resultCard.className=`result ${safe} show`;document.getElementById('demoBanner').style.display=isDemo?'block':'none';resultIcon.textContent=safe==='green'?'✓':'!';resultTitle.textContent=safe==='green'?'Green result':'Yellow result';resultMessage.textContent=message||defaultMessages[safe];shareButton.style.display=isDemo?'none':'';resultCard.scrollIntoView({behavior:'smooth',block:'center'})}
-    function buildPayload(){const f=attachment.files[0];return{name:fullName.value.trim(),company:companyName.value.trim(),town:town.value.trim(),phone:phone.value.trim(),website:website.value.trim(),pastedText:pastedText.value.trim(),reason:reason.value,marketingConsent:marketingConsent.checked,attachment:f?{name:f.name,type:f.type,size:f.size}:null}}
+    function buildPayload(){const f=attachment.files[0];return{name:fullName.value.trim(),company:companyName.value.trim(),town:town.value.trim(),phone:yourPhone.value.trim(),email:'',requesterName:yourName.value.trim(),website:website.value.trim(),pastedText:pastedText.value.trim(),reason:reason.value,marketingConsent:marketingConsent.checked,attachment:f?{name:f.name,type:f.type,size:f.size}:null}}
 
     const applyPromoButton=document.getElementById('applyPromoButton');
     const promoMessage=document.getElementById('promoMessage');
     applyPromoButton.addEventListener('click',async()=>{
       const code=document.getElementById('promoCode').value.trim();
       if(!code){promoMessage.style.display='block';promoMessage.style.color='var(--danger)';promoMessage.textContent='Enter a code first.';return}
-      if(!phone.value.trim()){promoMessage.style.display='block';promoMessage.style.color='var(--danger)';promoMessage.textContent='Enter your phone number above first, then apply the code.';return}
+      if(!yourPhone.value.trim()){promoMessage.style.display='block';promoMessage.style.color='var(--danger)';promoMessage.textContent='Fill in your phone number above first, then apply the code.';return}
       applyPromoButton.disabled=true;applyPromoButton.textContent='Checking...';
       try{
-        const response=await fetch(PROMO_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code,phone:phone.value.trim()})});
+        const response=await fetch(PROMO_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code,phone:yourPhone.value.trim()})});
         const data=await response.json();
         promoMessage.style.display='block';
         if(data.success){
@@ -106,7 +125,9 @@
     });
 
     form.addEventListener('submit',async e=>{
-      e.preventDefault();clearStatus();if(!form.checkValidity()){form.reportValidity();return}
+      e.preventDefault();clearStatus();
+      if(!yourPhone.value.trim()){yourPhone.focus();yourPhone.reportValidity();return}
+      if(!form.checkValidity()){form.reportValidity();return}
       const payload=buildPayload();setLoading(true);
       try{
         /* BACKEND INTEGRATION POINT: POST to API_ENDPOINT with JSON payload. Expected response: {status:'green'|'yellow', message:string} */
