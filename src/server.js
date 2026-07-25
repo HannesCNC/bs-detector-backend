@@ -4,8 +4,8 @@ import cors from "cors";
 import rateLimit from "express-rate-limit";
 import { runPublicSearch } from "./search.js";
 import { assess } from "./anthropic.js";
-import { appendCheckRow, appendMarketingConsent, countChecksThisMonth, recordSubscriptionEvent, getExtraScansThisMonth } from "./sheets.js";
-import { verifyPayFastNotification } from "./payfast.js";
+import { appendCheckRow, appendMarketingConsent, countChecksThisMonth, recordSubscriptionEvent, getExtraScansThisMonth, isSubscribedThisMonth } from "./sheets.js";
+import { verifyPayFastNotification, buildCheckoutFields } from "./payfast.js";
 import { applyPromoCode } from "./promo.js";
 
 const app = express();
@@ -101,6 +101,30 @@ app.post("/api/redeem-promo", async (req, res) => {
   }
 });
 
+app.post("/api/create-checkout", (req, res) => {
+  try {
+    const { phone } = req.body || {};
+    if (!phone) {
+      return res.status(400).json({ error: "A phone number is required to start checkout." });
+    }
+
+    const backendUrl = `https://${req.get("host")}`;
+    const { fields, processUrl } = buildCheckoutFields({
+      phone,
+      amount: process.env.SUBSCRIPTION_PRICE || "99.00",
+      itemName: "BS Detector - Personal subscription (1 month)",
+      returnUrl: process.env.CHECKOUT_RETURN_URL || "https://hannescnc.github.io/bs-detector-backend/",
+      cancelUrl: process.env.CHECKOUT_CANCEL_URL || "https://hannescnc.github.io/bs-detector-backend/",
+      notifyUrl: `${backendUrl}/webhooks/payfast-itn`,
+    });
+
+    return res.json({ fields, processUrl });
+  } catch (err) {
+    console.error("Error in /api/create-checkout:", err);
+    return res.status(500).json({ error: "Could not start checkout. Please try again shortly." });
+  }
+});
+
 app.post("/api/check", async (req, res) => {
   try {
     const {
@@ -136,6 +160,8 @@ app.post("/api/check", async (req, res) => {
       name, company, town, phone, website, pastedText, reason, searchResults: generalResults, submittedLink,
     });
 
+    const isPaidSubscriber = await isSubscribedThisMonth(phone);
+
     // --- Log to Sheets (audit trail + usage counting) ---
     const ip = req.headers["x-forwarded-for"]?.split(",")[0] || req.socket.remoteAddress;
     await appendCheckRow({
@@ -169,6 +195,11 @@ app.post("/api/check", async (req, res) => {
       message: result.message,
       scansRemaining: Math.max(0, totalAllowance - usedThisMonth - 1),
       disclaimer: "This is a limited public-source scan based on the information supplied. It is not a formal background check or legal clearance.",
+      isPaidSubscriber,
+      detailedSummary: isPaidSubscriber ? result.detailedSummary : null,
+      upgradePrompt: isPaidSubscriber
+        ? null
+        : "Want the full public-source summary behind this result? Upgrade for a detailed breakdown of everything found.",
     });
   } catch (err) {
     console.error("Error in /api/check:", err);
