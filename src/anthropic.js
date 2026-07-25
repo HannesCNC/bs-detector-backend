@@ -24,13 +24,28 @@ Rules:
 - NEVER quote search result text verbatim. Paraphrase only, and only at a
   high level (e.g. "public listings do not show a registered business under
   this name" rather than repeating specific quoted claims).
+- If a SUBMITTED LINK CHECK section shows the link could not be verified,
+  is login-walled, or is unreachable, treat that as a reason to lean "yellow"
+  (an unverifiable claimed profile is exactly the kind of thing that warrants
+  clarification) - do not treat an unreachable link as proof of anything bad,
+  only as unverified.
 - If search results are sparse or the query is too generic to be meaningful,
   return "yellow" with a message noting the scan was inconclusive due to
   limited identifying information - do not guess.
 - Output ONLY valid JSON, no markdown fences, no preamble:
   {"status": "green" | "yellow", "message": "one sentence, max 220 chars"}`;
 
-export async function assess({ name, company, town, phone, website, pastedText, reason, searchResults }) {
+export async function assess({ name, company, town, phone, website, pastedText, reason, searchResults, submittedLink }) {
+  const linkSection = !website
+    ? "(no website/social link submitted)"
+    : !submittedLink
+      ? "(link submitted but could not be checked)"
+      : !submittedLink.reachable
+        ? `The user submitted this link: ${submittedLink.url}. It could not be verified: ${submittedLink.note}`
+        : submittedLink.note
+          ? `The user submitted this link: ${submittedLink.url}. ${submittedLink.note}`
+          : `The user submitted this link: ${submittedLink.url}. Its public page title is: "${submittedLink.title || "(none)"}"${submittedLink.description ? ` and its public description is: "${submittedLink.description}"` : ""}.`;
+
   const userContent = `
 SUBMITTED INFORMATION:
 Name: ${name || "(not provided)"}
@@ -40,6 +55,9 @@ Phone: ${phone || "(not provided)"}
 Website/social: ${website || "(not provided)"}
 Reason for check: ${reason || "(not provided)"}
 Pasted text/claims from user: ${pastedText || "(none)"}
+
+SUBMITTED LINK CHECK (direct fetch of the exact link the user provided, if any):
+${linkSection}
 
 PUBLIC SEARCH RESULTS (title / snippet / link):
 ${searchResults.length === 0
