@@ -59,12 +59,12 @@
             <div class="span2 submitrow"><p class="help">No private credit report, criminal-record database or formal legal clearance is included in this free scan.</p><button id="submitButton" class="submit" type="submit">Run public check</button></div>
           </div>
         </form>
-        <div class="usage">You have <span id="remainingScans">5</span> of 5 free scans remaining this month.</div>
+        <div class="usage">You have <span id="remainingScans">5</span> free scans remaining this month.</div>
       </section>
 
       <section class="status" aria-live="polite">
         <div id="loadingCard" class="loading"><div class="loadrow"><div class="spinner"></div><div><strong>Running a limited public-source scan...</strong><p>This may take a few moments.</p></div></div></div>
-        <div id="resultCard" class="result"><div id="demoBanner" style="display:none;margin-bottom:12px;padding:8px 12px;border-radius:8px;background:#fef2f2;border:1px solid #fecaca;color:var(--danger);font-size:.78rem;font-weight:800;">⚠ DEMO MODE — the scan backend is unreachable right now. This is placeholder content only, not a real result. Please try again shortly.</div><div class="resulthead"><div id="resultIcon" class="icon"></div><div><h3 id="resultTitle"></h3><p id="resultMessage"></p></div></div><button id="shareButton" class="share" type="button">Share this result</button><p class="disclaimer">This is a limited public-source scan based on the information supplied. It is not a formal background check or legal clearance.</p></div>
+        <div id="resultCard" class="result"><div id="demoBanner" style="display:none;margin-bottom:12px;padding:8px 12px;border-radius:8px;background:#fef2f2;border:1px solid #fecaca;color:var(--danger);font-size:.78rem;font-weight:800;">⚠ DEMO MODE — the scan backend is unreachable right now. This is placeholder content only, not a real result. Please try again shortly.</div><div class="resulthead"><div id="resultIcon" class="icon"></div><div><h3 id="resultTitle"></h3><p id="resultMessage"></p></div></div><button id="shareButton" class="share" type="button">Share this result</button><div id="detailedSummaryBox" style="display:none;margin-top:16px;padding:14px 16px;border-radius:12px;background:rgba(255,255,255,.6);border:1px solid rgba(0,0,0,.06)"><h4 style="margin:0 0 8px;font-size:.86rem;color:var(--slate);text-transform:uppercase;letter-spacing:.05em">Full public-source summary</h4><p id="detailedSummaryText" style="margin:0;line-height:1.6"></p></div><div id="upgradeBox" style="display:none;margin-top:16px;padding:16px;border-radius:12px;background:#f5f3ff;border:1px solid #ddd6fe"><p id="upgradeText" style="margin:0 0 12px;color:#5b21b6;font-style:italic"></p><button id="upgradeButton" type="button" style="border:0;border-radius:10px;background:#5b21b6;color:#fff;padding:10px 18px;font-weight:800">Upgrade for full summary</button></div><p class="disclaimer">This is a limited public-source scan based on the information supplied. It is not a formal background check or legal clearance.</p></div>
         <div id="errorCard" class="error"><strong>We could not complete the check.</strong><span id="errorMessage"> Please try again.</span></div>
       </section>
     </main>
@@ -88,6 +88,31 @@
     // Left as a relative path only works if this HTML is served from the same domain as the backend.
     const API_ENDPOINT = 'https://bs-detector-backend-production.up.railway.app/api/check';
     const PROMO_ENDPOINT = 'https://bs-detector-backend-production.up.railway.app/api/redeem-promo';
+    const CHECKOUT_ENDPOINT = 'https://bs-detector-backend-production.up.railway.app/api/create-checkout';
+
+    const upgradeButton=document.getElementById('upgradeButton');
+    upgradeButton.addEventListener('click',async()=>{
+      if(!yourPhone.value.trim()){yourPhone.focus();yourPhone.reportValidity();return}
+      upgradeButton.disabled=true;upgradeButton.textContent='Redirecting to PayFast...';
+      try{
+        const response=await fetch(CHECKOUT_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone:yourPhone.value.trim()})});
+        const data=await response.json();
+        if(!data.fields||!data.processUrl)throw new Error('Unexpected checkout response');
+        const form=document.createElement('form');
+        form.method='POST';form.action=data.processUrl;
+        Object.entries(data.fields).forEach(([key,value])=>{
+          const input=document.createElement('input');
+          input.type='hidden';input.name=key;input.value=value;
+          form.appendChild(input);
+        });
+        document.body.appendChild(form);
+        form.submit();
+      }catch(err){
+        upgradeButton.disabled=false;upgradeButton.textContent='Upgrade for full summary';
+        errorMessage.textContent=' Could not start checkout. Please try again shortly.';
+        errorCard.classList.add('show');
+      }
+    });
 
     // Persist "Your details" locally on this device so it doesn't need retyping each visit.
     const yourName=document.getElementById('yourName');
@@ -101,7 +126,19 @@
 
     function setLoading(on){loadingCard.classList.toggle('show',on);submitButton.disabled=on;submitButton.textContent=on?'Running check...':'Run public check'}
     function clearStatus(){resultCard.className='result';errorCard.classList.remove('show');document.getElementById('demoBanner').style.display='none'}
-    function showResult(status,message,isDemo){const safe=status==='yellow'?'yellow':'green';lastResult=isDemo?null:{status:safe,message:message||defaultMessages[safe],name:fullName.value.trim(),company:companyName.value.trim()};resultCard.className=`result ${safe} show`;document.getElementById('demoBanner').style.display=isDemo?'block':'none';resultIcon.textContent=safe==='green'?'✓':'!';resultTitle.textContent=safe==='green'?'Green result':'Yellow result';resultMessage.textContent=message||defaultMessages[safe];shareButton.style.display=isDemo?'none':'';resultCard.scrollIntoView({behavior:'smooth',block:'center'})}
+    function showResult(status,message,isDemo,detailedSummary,upgradePrompt){const safe=status==='yellow'?'yellow':'green';lastResult=isDemo?null:{status:safe,message:message||defaultMessages[safe],name:fullName.value.trim(),company:companyName.value.trim()};resultCard.className=`result ${safe} show`;document.getElementById('demoBanner').style.display=isDemo?'block':'none';resultIcon.textContent=safe==='green'?'✓':'!';resultTitle.textContent=safe==='green'?'Green result':'Yellow result';resultMessage.textContent=message||defaultMessages[safe];shareButton.style.display=isDemo?'none':'';
+      const detailedBox=document.getElementById('detailedSummaryBox');
+      const upgradeBox=document.getElementById('upgradeBox');
+      if(detailedSummary){
+        document.getElementById('detailedSummaryText').textContent=detailedSummary;
+        detailedBox.style.display='block';upgradeBox.style.display='none';
+      }else if(upgradePrompt){
+        document.getElementById('upgradeText').textContent=upgradePrompt;
+        upgradeBox.style.display='block';detailedBox.style.display='none';
+      }else{
+        detailedBox.style.display='none';upgradeBox.style.display='none';
+      }
+      resultCard.scrollIntoView({behavior:'smooth',block:'center'})}
     function buildPayload(){const f=attachment.files[0];return{name:fullName.value.trim(),company:companyName.value.trim(),town:town.value.trim(),phone:yourPhone.value.trim(),subjectPhone:subjectPhone.value.trim(),email:'',requesterName:yourName.value.trim(),website:website.value.trim(),pastedText:pastedText.value.trim(),reason:reason.value,marketingConsent:marketingConsent.checked,attachment:f?{name:f.name,type:f.type,size:f.size}:null}}
 
     const applyPromoButton=document.getElementById('applyPromoButton');
@@ -143,7 +180,7 @@
         const data=await response.json();
         if(!data||!['green','yellow'].includes(data.status))throw new Error('Unexpected response format');
         if(typeof data.scansRemaining==='number')document.getElementById('remainingScans').textContent=data.scansRemaining;
-        showResult(data.status,data.message,false);
+        showResult(data.status,data.message,false,data.detailedSummary,data.upgradePrompt);
       }catch(err){
         /* Backend unreachable: show an honestly-labeled demo state, never a silent fake result. */
         console.warn('API unavailable; showing demo placeholder.',err);
