@@ -110,6 +110,13 @@ async function searchSerpApi(query) {
   url.searchParams.set("q", query);
   url.searchParams.set("api_key", key);
   url.searchParams.set("num", "10");
+  // Geo-target South Africa - without this SerpAPI defaults to a more
+  // US-centric slice of Google's index and can miss local SA business
+  // directories/registries entirely.
+  url.searchParams.set("gl", "za");
+  url.searchParams.set("hl", "en");
+  url.searchParams.set("google_domain", "google.co.za");
+  url.searchParams.set("location", "South Africa");
 
   const res = await fetch(url.toString());
   if (!res.ok) {
