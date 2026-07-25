@@ -2,8 +2,12 @@ import { getPromoCode, incrementPromoRedemption, appendPromoRedemption } from ".
 
 /**
  * Validates and redeems a promo code for a given phone number.
- * Returns { success: true, extraScans } on a valid redemption, or
+ * Returns { success: true, amount, codeType } on a valid redemption, or
  * { success: false, message } with a user-facing reason on failure.
+ *
+ * codeType is either "scans" (extends how many checks you can run this
+ * month) or "summary" (extends how many of those checks include the full
+ * detailed public-source summary, beyond the base 5 free ones).
  *
  * Note: this does NOT check whether this specific phone number has already
  * redeemed this code before - max_redemptions is a simple total-uses cap
@@ -38,14 +42,15 @@ export async function applyPromoCode({ code, phone }) {
   }
 
   // Redeem: bump the running count on the PromoCodes tab, and log this
-  // specific redemption for the monthly extra-scans calculation.
+  // specific redemption for the monthly extra-scans/extra-summary calculation.
   await incrementPromoRedemption(promo.rowNumber, promo.timesRedeemed + 1);
   await appendPromoRedemption({
     timestamp: new Date().toISOString(),
     phone,
     code: promo.code,
     extraScansGranted: promo.extraScans,
+    codeType: promo.codeType,
   });
 
-  return { success: true, extraScans: promo.extraScans };
+  return { success: true, amount: promo.extraScans, codeType: promo.codeType };
 }
