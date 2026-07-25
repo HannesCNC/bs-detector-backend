@@ -9,14 +9,29 @@
 
 export async function runPublicSearch({ name, company, town, website }) {
   const provider = process.env.SEARCH_PROVIDER || "serpapi";
-  const queryParts = [name, company, town].filter(Boolean);
-  const query = queryParts.join(" ");
 
   if (provider !== "serpapi") {
     throw new Error(`Unsupported SEARCH_PROVIDER: ${provider}`);
   }
 
-  const generalResults = query.trim() ? await searchSerpApi(query) : [];
+  const allResults = [];
+
+  // Run separate, quoted, targeted searches instead of one blended string.
+  // A single query like `Name Company Town` forces Google to find one page
+  // mentioning all three together - if no page does, it falls back to
+  // loosely-related junk instead of surfacing the actual person or business.
+  // Quoting the exact name/company and searching them independently gives a
+  // real chance of finding either one specifically.
+
+  if (name) {
+    const nameResults = await searchSerpApi(`"${name}"${town ? ` ${town}` : ""}`);
+    allResults.push(...nameResults);
+  }
+
+  if (company) {
+    const companyResults = await searchSerpApi(`"${company}"${town ? ` ${town}` : ""}`);
+    allResults.push(...companyResults);
+  }
 
   // If a website/social link was submitted, fetch that EXACT page directly
   // rather than searching for the name within the domain - a name-scoped
@@ -25,15 +40,15 @@ export async function runPublicSearch({ name, company, town, website }) {
   // visible at that specific link (or that it's login-walled/unreachable).
   const submittedLink = website ? await fetchSubmittedLink(website) : null;
 
-  // Dedupe general results by link, cap so the AI step isn't overwhelmed
+  // Dedupe by link, cap so the AI step isn't overwhelmed
   const seen = new Set();
-  const deduped = generalResults.filter((r) => {
+  const deduped = allResults.filter((r) => {
     if (!r.link || seen.has(r.link)) return false;
     seen.add(r.link);
     return true;
   });
 
-  return { generalResults: deduped.slice(0, 10), submittedLink };
+  return { generalResults: deduped.slice(0, 12), submittedLink };
 }
 
 async function fetchSubmittedLink(website) {
