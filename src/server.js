@@ -5,10 +5,10 @@ import rateLimit from "express-rate-limit";
 import { runPublicSearch } from "./search.js";
 import { assess } from "./anthropic.js";
 import { appendCheckRow, appendMarketingConsent, countChecksThisMonth } from "./sheets.js";
-const app = express();
-   app.set("trust proxy", 1);
-   app.use(express.json({ limit: "2mb" }));
 
+const app = express();
+app.set("trust proxy", 1); // Railway sits behind a proxy; needed for express-rate-limit and accurate client IPs
+app.use(express.json({ limit: "2mb" }));
 
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
@@ -61,7 +61,7 @@ app.post("/api/check", async (req, res) => {
     }
 
     // --- Run the actual scan ---
-    const searchResults = await runPublicSearch({ name, company, town });
+    const searchResults = await runPublicSearch({ name, company, town, website });
     const result = await assess({
       name, company, town, phone, website, pastedText, reason, searchResults,
     });
