@@ -18,6 +18,13 @@ import { google } from "googleapis";
  * Subscriptions tab (add this tab too, same header-row pattern):
  *   timestamp | phone | email | payment_status | amount_gross |
  *   pf_payment_id | item_name
+ *
+ * PromoCodes tab (you create/manage these rows manually):
+ *   code | extra_scans | max_redemptions | times_redeemed | expiry_date | active
+ *   (active = "yes"/"no" as plain text; expiry_date = YYYY-MM-DD or blank for none)
+ *
+ * PromoRedemptions tab (the app writes to this automatically, don't edit):
+ *   timestamp | phone | code | extra_scans_granted
  */
 
 let sheetsClient = null;
@@ -106,6 +113,83 @@ export async function recordSubscriptionEvent(row) {
     insertDataOption: "INSERT_ROWS",
     requestBody: { values },
   });
+}
+
+/**
+ * Looks up a promo code. Returns null if it doesn't exist. rowNumber is
+ * the actual sheet row (1-indexed, including header) so a redemption can
+ * update the right cell later.
+ */
+export async function getPromoCode(code) {
+  if (!code) return null;
+  const sheets = getClient();
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.GOOGLE_SHEET_ID,
+    range: "PromoCodes!A:F",
+  });
+
+  const rows = res.data.values || [];
+  const normalizedCode = code.trim().toLowerCase();
+
+  for (let i = 1; i < rows.length; i++) {
+    const [rowCode, extraScans, maxRedemptions, timesRedeemed, expiryDate, active] = rows[i];
+    if ((rowCode || "").trim().toLowerCase() === normalizedCode) {
+      return {
+        rowNumber: i + 1, // +1 because sheet rows are 1-indexed and this loop is 0-indexed from row 0
+        code: rowCode,
+        extraScans: Number(extraScans) || 0,
+        maxRedemptions: maxRedemptions === "" || maxRedemptions == null ? null : Number(maxRedemptions),
+        timesRedeemed: Number(timesRedeemed) || 0,
+        expiryDate: expiryDate || null,
+        active: (active || "").trim().toLowerCase() !== "no",
+      };
+    }
+  }
+  return null;
+}
+
+/** Bumps a promo code's times_redeemed count by 1 (column D). */
+export async function incrementPromoRedemption(rowNumber, newCount) {
+  const sheets = getClient();
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: process.env.GOOGLE_SHEET_ID,
+    range: `PromoCodes!D${rowNumber}`,
+    valueInputOption: "RAW",
+    requestBody: { values: [[newCount]] },
+  });
+}
+
+export async function appendPromoRedemption(row) {
+  const sheets = getClient();
+  const values = [[row.timestamp, row.phone || "", row.code || "", row.extraScansGranted || 0]];
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: process.env.GOOGLE_SHEET_ID,
+    range: "PromoRedemptions!A:D",
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values },
+  });
+}
+
+/** Sums extra scans a phone number has been granted via promo codes this calendar month. */
+export async function getExtraScansThisMonth(phone) {
+  if (!phone) return 0;
+  const sheets = getClient();
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.GOOGLE_SHEET_ID,
+    range: "PromoRedemptions!A:D",
+  });
+
+  const rows = res.data.values || [];
+  const now = new Date();
+
+  return rows.slice(1).reduce((total, r) => {
+    const [timestamp, rowPhone, , extraScansGranted] = r;
+    if (rowPhone !== phone) return total;
+    const d = new Date(timestamp);
+    if (d.getFullYear() !== now.getFullYear() || d.getMonth() !== now.getMonth()) return total;
+    return total + (Number(extraScansGranted) || 0);
+  }, 0);
 }
 
 /**
