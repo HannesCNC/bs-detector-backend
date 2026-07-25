@@ -45,15 +45,15 @@
         <div class="cardhead"><h3>Run a free quick check</h3><p>Fields marked with an asterisk are required. The free tier includes five scans per month.</p></div>
         <form id="checkForm" class="form" novalidate>
           <div class="grid two">
-            <div class="field span2"><label class="required" for="fullName">Name and surname</label><input id="fullName" required autocomplete="name" placeholder="e.g. Lloyd van Wyk"></div>
-            <div class="field"><label for="companyName">Company or trading name</label><input id="companyName" autocomplete="organization" placeholder="e.g. Executive Assets"></div>
+            <div class="field span2"><label class="required" for="fullName">Name and surname</label><input id="fullName" required autocomplete="name" placeholder="e.g. Jan Koekemoer"></div>
+            <div class="field"><label for="companyName">Company or trading name</label><input id="companyName" autocomplete="organization" placeholder="e.g. ABC Plumbing"></div>
             <div class="field"><label for="town">Town</label><input id="town" autocomplete="address-level2" placeholder="e.g. Bronkhorstspruit"></div>
             <div class="field"><label for="subjectPhone">Their phone number</label><input id="subjectPhone" type="tel" placeholder="e.g. +27 82 123 4567"></div>
             <div class="field"><label for="website">Website or social media link</label><input id="website" type="url" placeholder="https://example.com"></div>
             <div class="field span2"><label for="reason">Reason for check</label><select id="reason"><option value="considering_hiring">Considering hiring</option><option value="verifying_quote">Verifying a quote</option><option value="checking_contact">Checking a contact</option><option value="other">Other</option></select></div>
             <div class="field span2"><label for="pastedText">Paste text from a quote, message, email or business profile</label><textarea id="pastedText" placeholder="Paste any relevant text here..."></textarea></div>
             <div class="field span2"><label for="attachment">Upload a screenshot or quote</label><div class="filebox"><input id="attachment" type="file" accept=".png,.jpg,.jpeg,.webp,.pdf,.txt,.doc,.docx"></div><p class="help">This static prototype records file metadata only. A production backend can accept and process the actual file.</p></div>
-            <div class="field span2"><label for="promoCode">Promo code (optional)</label><div style="display:flex;gap:10px"><input id="promoCode" placeholder="e.g. SPRING2026" style="flex:1"><button id="applyPromoButton" type="button" style="white-space:nowrap;border:1px solid var(--line);border-radius:12px;background:#fff;color:var(--navy);padding:0 18px;font-weight:800">Apply code</button></div><p id="promoMessage" class="help" style="display:none"></p></div>
+            <div class="field span2"><div class="checkrow" style="background:var(--soft);border:1px solid #e2e8f0;padding:11px 14px"><input id="promoToggle" type="checkbox"><label for="promoToggle" style="font-weight:700;color:#334155">I have a promo code</label></div><div id="promoFieldWrap" style="display:none;margin-top:12px"><label for="promoCode">Promo code</label><div style="display:flex;gap:10px;margin-top:7px"><input id="promoCode" placeholder="e.g. SPRING2026" style="flex:1"><button id="applyPromoButton" type="button" style="white-space:nowrap;border:1px solid var(--line);border-radius:12px;background:#fff;color:var(--navy);padding:0 18px;font-weight:800">Apply code</button></div><p id="promoMessage" class="help" style="display:none"></p></div></div>
             <div class="span2 checkrow consent"><input id="purposeConsent" type="checkbox" required><label for="purposeConsent">By submitting, you confirm you are requesting this check for a legitimate purpose and understand this performs a limited public-source scan using the information supplied.</label></div>
             <div class="span2 checkrow marketing"><input id="marketingConsent" type="checkbox"><label for="marketingConsent">Send me product updates, estate-security information and special offers from BS Detector.</label></div>
             <div class="span2 submitrow"><p class="help">No private credit report, criminal-record database or formal legal clearance is included in this free scan.</p><button id="submitButton" class="submit" type="submit">Run public check</button></div>
@@ -141,6 +141,10 @@
       resultCard.scrollIntoView({behavior:'smooth',block:'center'})}
     function buildPayload(){const f=attachment.files[0];return{name:fullName.value.trim(),company:companyName.value.trim(),town:town.value.trim(),phone:yourPhone.value.trim(),subjectPhone:subjectPhone.value.trim(),email:'',requesterName:yourName.value.trim(),website:website.value.trim(),pastedText:pastedText.value.trim(),reason:reason.value,marketingConsent:marketingConsent.checked,attachment:f?{name:f.name,type:f.type,size:f.size}:null}}
 
+    const promoToggle=document.getElementById('promoToggle');
+    const promoFieldWrap=document.getElementById('promoFieldWrap');
+    promoToggle.addEventListener('change',()=>{promoFieldWrap.style.display=promoToggle.checked?'block':'none'});
+
     const applyPromoButton=document.getElementById('applyPromoButton');
     const promoMessage=document.getElementById('promoMessage');
     applyPromoButton.addEventListener('click',async()=>{
@@ -154,7 +158,8 @@
         promoMessage.style.display='block';
         if(data.success){
           promoMessage.style.color='var(--green)';
-          promoMessage.textContent=`Code applied — ${data.extraScans} extra scans added to your account for this month.`;
+          const label=data.codeType==='summary'?'detailed summary unlocks':'extra scans';
+          promoMessage.textContent=`Code applied — ${data.amount} ${label} added to your account for this month.`;
         }else{
           promoMessage.style.color='var(--danger)';
           promoMessage.textContent=data.message||'That code could not be applied.';
