@@ -16,37 +16,72 @@ export async function runPublicSearch({ name, company, town, website }) {
     throw new Error(`Unsupported SEARCH_PROVIDER: ${provider}`);
   }
 
-  const results = [];
+  const generalResults = query.trim() ? await searchSerpApi(query) : [];
 
-  if (query.trim()) {
-    const generalResults = await searchSerpApi(query);
-    results.push(...generalResults);
-  }
+  // If a website/social link was submitted, fetch that EXACT page directly
+  // rather than searching for the name within the domain - a name-scoped
+  // search only surfaces loosely-related name matches, not the actual
+  // claimed profile. A direct fetch tells us what is honestly, publicly
+  // visible at that specific link (or that it's login-walled/unreachable).
+  const submittedLink = website ? await fetchSubmittedLink(website) : null;
 
-  // If a website/social link was submitted, run a second targeted search
-  // scoped to that specific domain so we actually check the claimed profile,
-  // rather than relying on a generic name search to happen to surface it.
-  if (website) {
-    try {
-      const hostname = new URL(website.startsWith("http") ? website : `https://${website}`).hostname
-        .replace(/^www\./, "");
-      const siteQuery = [name, `site:${hostname}`].filter(Boolean).join(" ");
-      const siteResults = await searchSerpApi(siteQuery);
-      results.push(...siteResults);
-    } catch (err) {
-      console.warn("Could not parse submitted website for targeted search:", website, err.message);
-    }
-  }
-
-  // Dedupe by link, cap total so the AI step isn't overwhelmed
+  // Dedupe general results by link, cap so the AI step isn't overwhelmed
   const seen = new Set();
-  const deduped = results.filter((r) => {
+  const deduped = generalResults.filter((r) => {
     if (!r.link || seen.has(r.link)) return false;
     seen.add(r.link);
     return true;
   });
 
-  return deduped.slice(0, 12);
+  return { generalResults: deduped.slice(0, 10), submittedLink };
+}
+
+async function fetchSubmittedLink(website) {
+  let url;
+  try {
+    url = new URL(website.startsWith("http") ? website : `https://${website}`);
+  } catch {
+    return { url: website, reachable: false, note: "Submitted link is not a valid URL." };
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
+    const res = await fetch(url.toString(), {
+      signal: controller.signal,
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; BSDetectorBot/1.0)" },
+      redirect: "follow",
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      console.log(`[LINK DEBUG] ${url.toString()} returned status ${res.status}`);
+      return { url: url.toString(), reachable: false, note: `Link returned HTTP ${res.status}.` };
+    }
+
+    const html = await res.text();
+    const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1]?.trim() || null;
+    const ogDescription = (html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']*)["']/i) || [])[1]?.trim()
+      || (html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']*)["']/i) || [])[1]?.trim()
+      || null;
+
+    console.log(`[LINK DEBUG] ${url.toString()} title="${title}" desc="${ogDescription}"`);
+
+    const looksLoginWalled = /log ?in|sign ?up|sign ?in/i.test(title || "") && !ogDescription;
+
+    return {
+      url: url.toString(),
+      reachable: true,
+      title,
+      description: ogDescription,
+      note: looksLoginWalled
+        ? "The page appears to require login to view - no public profile content could be read."
+        : null,
+    };
+  } catch (err) {
+    console.log(`[LINK DEBUG] ${url.toString()} fetch failed: ${err.message}`);
+    return { url: url.toString(), reachable: false, note: "Link could not be reached (timeout or network error)." };
+  }
 }
 
 async function searchSerpApi(query) {
