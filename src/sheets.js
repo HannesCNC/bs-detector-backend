@@ -193,6 +193,34 @@ export async function getExtraScansThisMonth(phone) {
 }
 
 /**
+ * Checks whether a phone number has a verified, recent PayFast payment on
+ * record - treated as "currently subscribed" if a COMPLETE payment for that
+ * phone was logged within the last 30 days. This is a simple MVP approach
+ * (no real subscription start/end dates yet) - fine while there's no
+ * cancellation flow; revisit once actual subscription periods matter.
+ */
+export async function isSubscribedThisMonth(phone) {
+  if (!phone) return false;
+  const sheets = getClient();
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.GOOGLE_SHEET_ID,
+    range: "Subscriptions!A:D",
+  });
+
+  const rows = res.data.values || [];
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - 30);
+
+  return rows.slice(1).some((r) => {
+    const [timestamp, rowPhone, , paymentStatus] = r;
+    if (rowPhone !== phone) return false;
+    if ((paymentStatus || "").trim().toUpperCase() !== "COMPLETE") return false;
+    const d = new Date(timestamp);
+    return d >= cutoff;
+  });
+}
+
+/**
  * Counts how many checks a phone number has used in the current calendar month.
  * Simple MVP approach - fine at low volume. Move to a real DB (Postgres on
  * Railway) once volume or concurrency makes repeated full-sheet reads slow.
