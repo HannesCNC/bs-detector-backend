@@ -61,9 +61,9 @@ app.post("/api/check", async (req, res) => {
     }
 
     // --- Run the actual scan ---
-    const searchResults = await runPublicSearch({ name, company, town, website });
+    const { generalResults, submittedLink } = await runPublicSearch({ name, company, town, website });
     const result = await assess({
-      name, company, town, phone, website, pastedText, reason, searchResults,
+      name, company, town, phone, website, pastedText, reason, searchResults: generalResults, submittedLink,
     });
 
     // --- Log to Sheets (audit trail + usage counting) ---
