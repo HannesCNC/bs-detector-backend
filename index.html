@@ -38,6 +38,7 @@
             <div class="field span2"><label for="reason">Reason for check</label><select id="reason"><option value="considering_hiring">Considering hiring</option><option value="verifying_quote">Verifying a quote</option><option value="checking_contact">Checking a contact</option><option value="other">Other</option></select></div>
             <div class="field span2"><label for="pastedText">Paste text from a quote, message, email or business profile</label><textarea id="pastedText" placeholder="Paste any relevant text here..."></textarea></div>
             <div class="field span2"><label for="attachment">Upload a screenshot or quote</label><div class="filebox"><input id="attachment" type="file" accept=".png,.jpg,.jpeg,.webp,.pdf,.txt,.doc,.docx"></div><p class="help">This static prototype records file metadata only. A production backend can accept and process the actual file.</p></div>
+            <div class="field span2"><label for="promoCode">Promo code (optional)</label><div style="display:flex;gap:10px"><input id="promoCode" placeholder="e.g. SPRING2026" style="flex:1"><button id="applyPromoButton" type="button" style="white-space:nowrap;border:1px solid var(--line);border-radius:12px;background:#fff;color:var(--navy);padding:0 18px;font-weight:800">Apply code</button></div><p id="promoMessage" class="help" style="display:none"></p></div>
             <div class="span2 checkrow consent"><input id="purposeConsent" type="checkbox" required><label for="purposeConsent">By submitting, you confirm you are requesting this check for a legitimate purpose and understand this performs a limited public-source scan using the information supplied.</label></div>
             <div class="span2 checkrow marketing"><input id="marketingConsent" type="checkbox"><label for="marketingConsent">Send me product updates, estate-security information and special offers from BS Detector.</label></div>
             <div class="span2 submitrow"><p class="help">No private credit report, criminal-record database or formal legal clearance is included in this free scan.</p><button id="submitButton" class="submit" type="submit">Run public check</button></div>
@@ -71,11 +72,38 @@
     // Set this to your deployed Railway URL, e.g. 'https://bsdetector-backend-production.up.railway.app/api/check'
     // Left as a relative path only works if this HTML is served from the same domain as the backend.
     const API_ENDPOINT = 'https://bs-detector-backend-production.up.railway.app/api/check';
+    const PROMO_ENDPOINT = 'https://bs-detector-backend-production.up.railway.app/api/redeem-promo';
 
     function setLoading(on){loadingCard.classList.toggle('show',on);submitButton.disabled=on;submitButton.textContent=on?'Running check...':'Run public check'}
     function clearStatus(){resultCard.className='result';errorCard.classList.remove('show');document.getElementById('demoBanner').style.display='none'}
     function showResult(status,message,isDemo){const safe=status==='yellow'?'yellow':'green';lastResult=isDemo?null:{status:safe,message:message||defaultMessages[safe],name:fullName.value.trim(),company:companyName.value.trim()};resultCard.className=`result ${safe} show`;document.getElementById('demoBanner').style.display=isDemo?'block':'none';resultIcon.textContent=safe==='green'?'✓':'!';resultTitle.textContent=safe==='green'?'Green result':'Yellow result';resultMessage.textContent=message||defaultMessages[safe];shareButton.style.display=isDemo?'none':'';resultCard.scrollIntoView({behavior:'smooth',block:'center'})}
     function buildPayload(){const f=attachment.files[0];return{name:fullName.value.trim(),company:companyName.value.trim(),town:town.value.trim(),phone:phone.value.trim(),website:website.value.trim(),pastedText:pastedText.value.trim(),reason:reason.value,marketingConsent:marketingConsent.checked,attachment:f?{name:f.name,type:f.type,size:f.size}:null}}
+
+    const applyPromoButton=document.getElementById('applyPromoButton');
+    const promoMessage=document.getElementById('promoMessage');
+    applyPromoButton.addEventListener('click',async()=>{
+      const code=document.getElementById('promoCode').value.trim();
+      if(!code){promoMessage.style.display='block';promoMessage.style.color='var(--danger)';promoMessage.textContent='Enter a code first.';return}
+      if(!phone.value.trim()){promoMessage.style.display='block';promoMessage.style.color='var(--danger)';promoMessage.textContent='Enter your phone number above first, then apply the code.';return}
+      applyPromoButton.disabled=true;applyPromoButton.textContent='Checking...';
+      try{
+        const response=await fetch(PROMO_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code,phone:phone.value.trim()})});
+        const data=await response.json();
+        promoMessage.style.display='block';
+        if(data.success){
+          promoMessage.style.color='var(--green)';
+          promoMessage.textContent=`Code applied — ${data.extraScans} extra scans added to your account for this month.`;
+        }else{
+          promoMessage.style.color='var(--danger)';
+          promoMessage.textContent=data.message||'That code could not be applied.';
+        }
+      }catch(err){
+        promoMessage.style.display='block';promoMessage.style.color='var(--danger)';
+        promoMessage.textContent='Could not reach the server to check that code. Please try again shortly.';
+      }finally{
+        applyPromoButton.disabled=false;applyPromoButton.textContent='Apply code';
+      }
+    });
 
     form.addEventListener('submit',async e=>{
       e.preventDefault();clearStatus();if(!form.checkValidity()){form.reportValidity();return}
