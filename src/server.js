@@ -1,284 +1,263 @@
-import { google } from "googleapis";
+import "dotenv/config";
+import express from "express";
+import cors from "cors";
+import rateLimit from "express-rate-limit";
+import { runPublicSearch } from "./search.js";
+import { assess } from "./anthropic.js";
+import { appendCheckRow, appendMarketingConsent, countChecksThisMonth, recordSubscriptionEvent, getExtraScansThisMonth, getExtraSummaryUnlocksThisMonth, isSubscribedThisMonth } from "./sheets.js";
+import { verifyPayFastNotification, buildCheckoutFields } from "./payfast.js";
+import { applyPromoCode } from "./promo.js";
 
-/**
- * Thin wrapper around Google Sheets used as a lightweight database for the MVP.
- * Two tabs expected in the target spreadsheet:
- *   - "Checks"   : log of every scan performed (for usage limits + audit trail)
- *   - "Marketing": opt-in consent records, kept separate per the framework's
- *                  requirement that marketing consent never be bundled with
- *                  the service consent.
- *
- * Sheet columns (row 1 headers), Checks tab:
- *   timestamp | phone | email | name_checked | company_checked | town |
- *   reason | status | message | consent_version | ip | source | user_type
- *
- *   source: where the check came from, e.g. "direct" (existing Scammer Scan
- *   frontend) or "richlab" (RichLab-hosted Business Check page). Defaults to
- *   "direct" server-side if the caller doesn't send one - old rows and old
- *   frontend requests are unaffected.
- *
- *   user_type: optional organisational lead classification, one of
- *   personal | business | estate_hoa | managing_agent | security_company |
- *   other_organisation, or blank if not supplied/not recognised.
- *
- * Marketing tab:
- *   timestamp | phone | email | marketing_consent | consent_version
- *
- * Subscriptions tab (add this tab too, same header-row pattern):
- *   timestamp | phone | email | payment_status | amount_gross |
- *   pf_payment_id | item_name
- *
- * PromoCodes tab (you create/manage these rows manually):
- *   code | extra_scans | max_redemptions | times_redeemed | expiry_date | active | code_type
- *   (active = "yes"/"no" as plain text; expiry_date = YYYY-MM-DD or blank for none;
- *    code_type = "scans" or "summary" - leave blank for old codes, treated as "scans".
- *    "scans" codes grant extra checks per month; "summary" codes grant extra
- *    detailed-summary unlocks per month, beyond the base 5 free ones.)
- *
- * PromoRedemptions tab (the app writes to this automatically, don't edit):
- *   timestamp | phone | code | extra_scans_granted | code_type
- */
+const app = express();
+app.set("trust proxy", 1); // Railway sits behind a proxy; needed for express-rate-limit and accurate client IPs
+app.use(express.json({ limit: "2mb" }));
 
-let sheetsClient = null;
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
-function getClient() {
-  if (sheetsClient) return sheetsClient;
+app.use(cors({
+  origin: allowedOrigins.length ? allowedOrigins : true,
+}));
 
-  const auth = new google.auth.GoogleAuth({
-    credentials: {
-      client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-      // Railway/most host env vars store newlines escaped - unescape them here
-      private_key: (process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
+// Values accepted for the optional userType field (RichLab organisational
+// lead classification). Anything else submitted is silently ignored rather
+// than rejected, so this stays a non-breaking, optional field.
+const ALLOWED_USER_TYPES = [
+  "personal",
+  "business",
+  "estate_hoa",
+  "managing_agent",
+  "security_company",
+  "other_organisation",
+];
+
+// Basic bot/abuse throttle on top of the per-phone monthly cap below.
+// Custom handler so a rate-limit hit returns clean, frontend-friendly JSON
+// instead of the default plain-text response.
+const limiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => {
+    res.status(429).json({
+      error: "rate_limited",
+      message: "Our system is receiving too many checks at the moment. Please try again shortly.",
+    });
+  },
+});
+app.use("/api/", limiter);
+
+const FREE_SCANS_PER_MONTH = Number(process.env.FREE_SCANS_PER_MONTH || 5);
+const CONSENT_VERSION = "v1.0-2026-07-24";
+
+app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// PayFast sends its ITN as application/x-www-form-urlencoded. We need the
+// EXACT raw body (not re-encoded by a parser) to pass back to PayFast's own
+// validation endpoint, so we capture it manually before parsing.
+app.post(
+  "/webhooks/payfast-itn",
+  express.urlencoded({
+    extended: false,
+    verify: (req, _res, buf) => {
+      req.rawBody = buf.toString("utf8");
     },
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-  });
+  }),
+  async (req, res) => {
+    // Always respond 200 quickly - PayFast retries if it doesn't get one.
+    // We do the actual verification after responding is not safe though,
+    // since we must not act on unverified data - so we verify first, but
+    // keep it fast (signature check is instant; the PayFast confirmation
+    // call is the only network round-trip).
+    try {
+      const fields = req.body || {};
+      const verification = await verifyPayFastNotification(fields, req.rawBody);
 
-  sheetsClient = google.sheets({ version: "v4", auth });
-  return sheetsClient;
-}
+      if (!verification.valid) {
+        console.warn("Rejected PayFast ITN:", verification.reason, fields);
+        // Still return 200 so PayFast doesn't endlessly retry a forged/bad
+        // notification, but we never mark anything as paid.
+        return res.sendStatus(200);
+      }
 
-export async function appendCheckRow(row) {
-  const sheets = getClient();
-  const values = [[
-    row.timestamp,
-    row.phone || "",
-    row.email || "",
-    row.nameChecked || "",
-    row.companyChecked || "",
-    row.town || "",
-    row.reason || "",
-    row.status,
-    row.message,
-    row.consentVersion || "",
-    row.ip || "",
-    row.source || "direct",
-    row.userType || "",
-  ]];
+      // Genuine, verified payment notification - record it.
+      // custom_str1 is where we'll pass the user's phone number when the
+      // checkout is initiated (front-end/checkout-initiation piece not yet
+      // built - this endpoint currently only handles the receiving side).
+      await recordSubscriptionEvent({
+        timestamp: new Date().toISOString(),
+        phone: fields.custom_str1 || "",
+        email: fields.email_address || "",
+        paymentStatus: fields.payment_status || "",
+        amountGross: fields.amount_gross || "",
+        pfPaymentId: fields.pf_payment_id || "",
+        itemName: fields.item_name || "",
+      });
 
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: process.env.GOOGLE_SHEET_ID,
-    range: "Checks!A:M",
-    valueInputOption: "RAW",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: { values },
-  });
-}
-
-export async function appendMarketingConsent(row) {
-  const sheets = getClient();
-  const values = [[
-    row.timestamp,
-    row.phone || "",
-    row.email || "",
-    row.marketingConsent ? "yes" : "no",
-    row.consentVersion || "",
-  ]];
-
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: process.env.GOOGLE_SHEET_ID,
-    range: "Marketing!A:E",
-    valueInputOption: "RAW",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: { values },
-  });
-}
-
-/**
- * Logs a VERIFIED PayFast payment notification (only ever called after
- * payfast.js has confirmed the notification is genuine - never call this
- * from unverified webhook data).
- */
-export async function recordSubscriptionEvent(row) {
-  const sheets = getClient();
-  const values = [[
-    row.timestamp,
-    row.phone || "",
-    row.email || "",
-    row.paymentStatus || "",
-    row.amountGross || "",
-    row.pfPaymentId || "",
-    row.itemName || "",
-  ]];
-
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: process.env.GOOGLE_SHEET_ID,
-    range: "Subscriptions!A:G",
-    valueInputOption: "RAW",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: { values },
-  });
-}
-
-/**
- * Looks up a promo code. Returns null if it doesn't exist. rowNumber is
- * the actual sheet row (1-indexed, including header) so a redemption can
- * update the right cell later.
- */
-export async function getPromoCode(code) {
-  if (!code) return null;
-  const sheets = getClient();
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: process.env.GOOGLE_SHEET_ID,
-    range: "PromoCodes!A:G",
-  });
-
-  const rows = res.data.values || [];
-  const normalizedCode = code.trim().toLowerCase();
-
-  for (let i = 1; i < rows.length; i++) {
-    const [rowCode, extraScans, maxRedemptions, timesRedeemed, expiryDate, active, codeType] = rows[i];
-    if ((rowCode || "").trim().toLowerCase() === normalizedCode) {
-      return {
-        rowNumber: i + 1, // +1 because sheet rows are 1-indexed and this loop is 0-indexed from row 0
-        code: rowCode,
-        extraScans: Number(extraScans) || 0,
-        maxRedemptions: maxRedemptions === "" || maxRedemptions == null ? null : Number(maxRedemptions),
-        timesRedeemed: Number(timesRedeemed) || 0,
-        expiryDate: expiryDate || null,
-        active: (active || "").trim().toLowerCase() !== "no",
-        codeType: (codeType || "scans").trim().toLowerCase() === "summary" ? "summary" : "scans",
-      };
+      return res.sendStatus(200);
+    } catch (err) {
+      console.error("Error handling PayFast ITN:", err);
+      // Return 200 anyway - a 500 here just causes PayFast to hammer retries
+      // for an error that's on our side, not something re-sending will fix.
+      return res.sendStatus(200);
     }
   }
-  return null;
-}
+);
 
-/** Bumps a promo code's times_redeemed count by 1 (column D). */
-export async function incrementPromoRedemption(rowNumber, newCount) {
-  const sheets = getClient();
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: process.env.GOOGLE_SHEET_ID,
-    range: `PromoCodes!D${rowNumber}`,
-    valueInputOption: "RAW",
-    requestBody: { values: [[newCount]] },
-  });
-}
+app.post("/api/redeem-promo", async (req, res) => {
+  try {
+    const { code, phone } = req.body || {};
+    if (!phone) {
+      return res.status(400).json({ success: false, error: "validation_error", message: "A phone number is required to redeem a code." });
+    }
+    const result = await applyPromoCode({ code, phone });
+    return res.json(result);
+  } catch (err) {
+    console.error("Error in /api/redeem-promo:", err);
+    return res.status(500).json({ success: false, error: "server_error", message: "Something went wrong redeeming that code. Please try again shortly." });
+  }
+});
 
-export async function appendPromoRedemption(row) {
-  const sheets = getClient();
-  const values = [[row.timestamp, row.phone || "", row.code || "", row.extraScansGranted || 0, row.codeType || "scans"]];
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: process.env.GOOGLE_SHEET_ID,
-    range: "PromoRedemptions!A:E",
-    valueInputOption: "RAW",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: { values },
-  });
-}
+app.post("/api/create-checkout", (req, res) => {
+  try {
+    const { phone } = req.body || {};
+    if (!phone) {
+      return res.status(400).json({ error: "validation_error", message: "A phone number is required to start checkout." });
+    }
 
-/** Sums extra SCAN-type promo grants for a phone this calendar month (blank code_type counts as "scans" for backward compatibility). */
-export async function getExtraScansThisMonth(phone) {
-  if (!phone) return 0;
-  const sheets = getClient();
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: process.env.GOOGLE_SHEET_ID,
-    range: "PromoRedemptions!A:E",
-  });
+    const backendUrl = `https://${req.get("host")}`;
+    const { fields, processUrl } = buildCheckoutFields({
+      phone,
+      amount: process.env.SUBSCRIPTION_PRICE || "99.00",
+      itemName: "BS Detector - Personal subscription (1 month)",
+      returnUrl: process.env.CHECKOUT_RETURN_URL || "https://hannescnc.github.io/bs-detector-backend/",
+      cancelUrl: process.env.CHECKOUT_CANCEL_URL || "https://hannescnc.github.io/bs-detector-backend/",
+      notifyUrl: `${backendUrl}/webhooks/payfast-itn`,
+    });
 
-  const rows = res.data.values || [];
-  const now = new Date();
+    return res.json({ fields, processUrl });
+  } catch (err) {
+    console.error("Error in /api/create-checkout:", err);
+    return res.status(500).json({ error: "server_error", message: "Could not start checkout. Please try again shortly." });
+  }
+});
 
-  return rows.slice(1).reduce((total, r) => {
-    const [timestamp, rowPhone, , extraScansGranted, codeType] = r;
-    if (rowPhone !== phone) return total;
-    if ((codeType || "scans").trim().toLowerCase() !== "scans") return total;
-    const d = new Date(timestamp);
-    if (d.getFullYear() !== now.getFullYear() || d.getMonth() !== now.getMonth()) return total;
-    return total + (Number(extraScansGranted) || 0);
-  }, 0);
-}
+app.post("/api/check", async (req, res) => {
+  try {
+    const {
+      name,
+      company,
+      town,
+      phone,
+      email,
+      website,
+      pastedText,
+      reason,
+      marketingConsent,
+      source,
+      userType,
+    } = req.body || {};
 
-/** Sums extra SUMMARY-unlock promo grants for a phone this calendar month. */
-export async function getExtraSummaryUnlocksThisMonth(phone) {
-  if (!phone) return 0;
-  const sheets = getClient();
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: process.env.GOOGLE_SHEET_ID,
-    range: "PromoRedemptions!A:E",
-  });
+    if (!name || !phone) {
+      return res.status(400).json({ error: "validation_error", message: "Name and a verified phone number are required." });
+    }
 
-  const rows = res.data.values || [];
-  const now = new Date();
+    // Optional, non-breaking fields. Any caller that omits them (the
+    // existing Scammer Scan frontend) behaves exactly as before.
+    const resolvedSource = (typeof source === "string" && source.trim()) ? source.trim().toLowerCase() : "direct";
+    const resolvedUserType = (typeof userType === "string" && ALLOWED_USER_TYPES.includes(userType.trim().toLowerCase()))
+      ? userType.trim().toLowerCase()
+      : "";
 
-  return rows.slice(1).reduce((total, r) => {
-    const [timestamp, rowPhone, , extraGranted, codeType] = r;
-    if (rowPhone !== phone) return total;
-    if ((codeType || "").trim().toLowerCase() !== "summary") return total;
-    const d = new Date(timestamp);
-    if (d.getFullYear() !== now.getFullYear() || d.getMonth() !== now.getMonth()) return total;
-    return total + (Number(extraGranted) || 0);
-  }, 0);
-}
+    // --- Free tier enforcement (base allowance + any promo-granted extra scans) ---
+    const usedThisMonth = await countChecksThisMonth(phone);
+    const extraScans = await getExtraScansThisMonth(phone);
+    const totalAllowance = FREE_SCANS_PER_MONTH + extraScans;
+    if (usedThisMonth >= totalAllowance) {
+      return res.status(429).json({
+        error: "free_tier_exceeded",
+        message: `You've used your ${totalAllowance} available scans this month. Upgrade to a paid plan or enter a promo code for more checks.`,
+      });
+    }
 
-/**
- * Checks whether a phone number has a verified, recent PayFast payment on
- * record - treated as "currently subscribed" if a COMPLETE payment for that
- * phone was logged within the last 30 days. This is a simple MVP approach
- * (no real subscription start/end dates yet) - fine while there's no
- * cancellation flow; revisit once actual subscription periods matter.
- */
-export async function isSubscribedThisMonth(phone) {
-  if (!phone) return false;
-  const sheets = getClient();
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: process.env.GOOGLE_SHEET_ID,
-    range: "Subscriptions!A:D",
-  });
+    // --- Run the actual scan ---
+    // Isolated try/catch: failures here are almost always an upstream
+    // dependency (search provider or the assessment call) rather than a bug
+    // in our own logic, so they get a distinct 503 "temporarily overloaded"
+    // response instead of the generic 500 used below.
+    let generalResults, submittedLink, result;
+    try {
+      ({ generalResults, submittedLink } = await runPublicSearch({ name, company, town, website }));
+      result = await assess({
+        name, company, town, phone, website, pastedText, reason, searchResults: generalResults, submittedLink,
+      });
+    } catch (scanErr) {
+      console.error("Error running scan (search/assess) in /api/check:", scanErr);
+      return res.status(503).json({
+        error: "temporarily_unavailable",
+        message: "Our system is currently overloaded. Please try again in a couple of hours.",
+      });
+    }
 
-  const rows = res.data.values || [];
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - 30);
+    const isPaidSubscriber = await isSubscribedThisMonth(phone);
+    const extraSummaryUnlocks = await getExtraSummaryUnlocksThisMonth(phone);
+    const BASE_FREE_SUMMARIES = Number(process.env.FREE_DETAILED_SUMMARIES_PER_MONTH || 5);
+    const summaryAllowance = BASE_FREE_SUMMARIES + extraSummaryUnlocks;
+    // usedThisMonth is the count BEFORE this request - so this check is the
+    // (usedThisMonth + 1)th of the month. It gets the full summary for free
+    // if it falls within the base+promo allowance, or if the user is a paid
+    // subscriber (who always gets it regardless of count).
+    const includeDetailedSummary = isPaidSubscriber || usedThisMonth < summaryAllowance;
 
-  return rows.slice(1).some((r) => {
-    const [timestamp, rowPhone, , paymentStatus] = r;
-    if (rowPhone !== phone) return false;
-    if ((paymentStatus || "").trim().toUpperCase() !== "COMPLETE") return false;
-    const d = new Date(timestamp);
-    return d >= cutoff;
-  });
-}
+    // --- Log to Sheets (audit trail + usage counting) ---
+    const ip = req.headers["x-forwarded-for"]?.split(",")[0] || req.socket.remoteAddress;
+    await appendCheckRow({
+      timestamp: new Date().toISOString(),
+      phone,
+      email,
+      nameChecked: name,
+      companyChecked: company,
+      town,
+      reason,
+      status: result.status,
+      message: result.message,
+      consentVersion: CONSENT_VERSION,
+      ip,
+      source: resolvedSource,
+      userType: resolvedUserType,
+    });
 
-/**
- * Counts how many checks a phone number has used in the current calendar month.
- * Simple MVP approach - fine at low volume. Move to a real DB (Postgres on
- * Railway) once volume or concurrency makes repeated full-sheet reads slow.
- */
-export async function countChecksThisMonth(phone) {
-  if (!phone) return 0;
-  const sheets = getClient();
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: process.env.GOOGLE_SHEET_ID,
-    range: "Checks!A:B",
-  });
+    // Marketing consent is stored separately and only if explicitly ticked -
+    // never inferred from the service consent, per the framework's requirement.
+    if (typeof marketingConsent === "boolean") {
+      await appendMarketingConsent({
+        timestamp: new Date().toISOString(),
+        phone,
+        email,
+        marketingConsent,
+        consentVersion: CONSENT_VERSION,
+      });
+    }
 
-  const rows = res.data.values || [];
-  const now = new Date();
-  const monthKey = `${now.getFullYear()}-${now.getMonth()}`;
+    return res.json({
+      status: result.status,
+      message: result.message,
+      scansRemaining: Math.max(0, totalAllowance - usedThisMonth - 1),
+      disclaimer: "This is a limited public-source scan based on the information supplied. It is not a formal background check or legal clearance.",
+      isPaidSubscriber,
+      detailedSummary: includeDetailedSummary ? result.detailedSummary : null,
+      upgradePrompt: includeDetailedSummary
+        ? null
+        : "You've used your free detailed summaries for this month. Upgrade for unlimited full summaries, or enter a promo code for 5 more.",
+    });
+  } catch (err) {
+    console.error("Error in /api/check:", err);
+    return res.status(500).json({ error: "server_error", message: "Something went wrong running the scan. Please try again shortly." });
+  }
+});
 
-  return rows.filter((r) => {
-    const [timestamp, rowPhone] = r;
-    if (rowPhone !== phone) return false;
-    const d = new Date(timestamp);
-    return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
-  }).length;
-}
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`BS Detector backend listening on port ${port}`));
