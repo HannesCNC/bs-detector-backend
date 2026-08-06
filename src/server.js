@@ -21,12 +21,32 @@ app.use(cors({
   origin: allowedOrigins.length ? allowedOrigins : true,
 }));
 
+// Values accepted for the optional userType field (RichLab organisational
+// lead classification). Anything else submitted is silently ignored rather
+// than rejected, so this stays a non-breaking, optional field.
+const ALLOWED_USER_TYPES = [
+  "personal",
+  "business",
+  "estate_hoa",
+  "managing_agent",
+  "security_company",
+  "other_organisation",
+];
+
 // Basic bot/abuse throttle on top of the per-phone monthly cap below.
+// Custom handler so a rate-limit hit returns clean, frontend-friendly JSON
+// instead of the default plain-text response.
 const limiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  handler: (_req, res) => {
+    res.status(429).json({
+      error: "rate_limited",
+      message: "Our system is receiving too many checks at the moment. Please try again shortly.",
+    });
+  },
 });
 app.use("/api/", limiter);
 
@@ -91,13 +111,13 @@ app.post("/api/redeem-promo", async (req, res) => {
   try {
     const { code, phone } = req.body || {};
     if (!phone) {
-      return res.status(400).json({ success: false, message: "A phone number is required to redeem a code." });
+      return res.status(400).json({ success: false, error: "validation_error", message: "A phone number is required to redeem a code." });
     }
     const result = await applyPromoCode({ code, phone });
     return res.json(result);
   } catch (err) {
     console.error("Error in /api/redeem-promo:", err);
-    return res.status(500).json({ success: false, message: "Something went wrong redeeming that code. Please try again shortly." });
+    return res.status(500).json({ success: false, error: "server_error", message: "Something went wrong redeeming that code. Please try again shortly." });
   }
 });
 
@@ -105,7 +125,7 @@ app.post("/api/create-checkout", (req, res) => {
   try {
     const { phone } = req.body || {};
     if (!phone) {
-      return res.status(400).json({ error: "A phone number is required to start checkout." });
+      return res.status(400).json({ error: "validation_error", message: "A phone number is required to start checkout." });
     }
 
     const backendUrl = `https://${req.get("host")}`;
@@ -121,7 +141,7 @@ app.post("/api/create-checkout", (req, res) => {
     return res.json({ fields, processUrl });
   } catch (err) {
     console.error("Error in /api/create-checkout:", err);
-    return res.status(500).json({ error: "Could not start checkout. Please try again shortly." });
+    return res.status(500).json({ error: "server_error", message: "Could not start checkout. Please try again shortly." });
   }
 });
 
@@ -137,11 +157,20 @@ app.post("/api/check", async (req, res) => {
       pastedText,
       reason,
       marketingConsent,
+      source,
+      userType,
     } = req.body || {};
 
     if (!name || !phone) {
-      return res.status(400).json({ error: "Name and a verified phone number are required." });
+      return res.status(400).json({ error: "validation_error", message: "Name and a verified phone number are required." });
     }
+
+    // Optional, non-breaking fields. Any caller that omits them (the
+    // existing Scammer Scan frontend) behaves exactly as before.
+    const resolvedSource = (typeof source === "string" && source.trim()) ? source.trim().toLowerCase() : "direct";
+    const resolvedUserType = (typeof userType === "string" && ALLOWED_USER_TYPES.includes(userType.trim().toLowerCase()))
+      ? userType.trim().toLowerCase()
+      : "";
 
     // --- Free tier enforcement (base allowance + any promo-granted extra scans) ---
     const usedThisMonth = await countChecksThisMonth(phone);
@@ -155,10 +184,23 @@ app.post("/api/check", async (req, res) => {
     }
 
     // --- Run the actual scan ---
-    const { generalResults, submittedLink } = await runPublicSearch({ name, company, town, website });
-    const result = await assess({
-      name, company, town, phone, website, pastedText, reason, searchResults: generalResults, submittedLink,
-    });
+    // Isolated try/catch: failures here are almost always an upstream
+    // dependency (search provider or the assessment call) rather than a bug
+    // in our own logic, so they get a distinct 503 "temporarily overloaded"
+    // response instead of the generic 500 used below.
+    let generalResults, submittedLink, result;
+    try {
+      ({ generalResults, submittedLink } = await runPublicSearch({ name, company, town, website }));
+      result = await assess({
+        name, company, town, phone, website, pastedText, reason, searchResults: generalResults, submittedLink,
+      });
+    } catch (scanErr) {
+      console.error("Error running scan (search/assess) in /api/check:", scanErr);
+      return res.status(503).json({
+        error: "temporarily_unavailable",
+        message: "Our system is currently overloaded. Please try again in a couple of hours.",
+      });
+    }
 
     const isPaidSubscriber = await isSubscribedThisMonth(phone);
     const extraSummaryUnlocks = await getExtraSummaryUnlocksThisMonth(phone);
@@ -184,6 +226,8 @@ app.post("/api/check", async (req, res) => {
       message: result.message,
       consentVersion: CONSENT_VERSION,
       ip,
+      source: resolvedSource,
+      userType: resolvedUserType,
     });
 
     // Marketing consent is stored separately and only if explicitly ticked -
@@ -211,7 +255,7 @@ app.post("/api/check", async (req, res) => {
     });
   } catch (err) {
     console.error("Error in /api/check:", err);
-    return res.status(500).json({ error: "Something went wrong running the scan. Please try again shortly." });
+    return res.status(500).json({ error: "server_error", message: "Something went wrong running the scan. Please try again shortly." });
   }
 });
 
