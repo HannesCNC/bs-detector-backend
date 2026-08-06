@@ -10,7 +10,16 @@ import { google } from "googleapis";
  *
  * Sheet columns (row 1 headers), Checks tab:
  *   timestamp | phone | email | name_checked | company_checked | town |
- *   reason | status | message | consent_version | ip
+ *   reason | status | message | consent_version | ip | source | user_type
+ *
+ *   source: where the check came from, e.g. "direct" (existing Scammer Scan
+ *   frontend) or "richlab" (RichLab-hosted Business Check page). Defaults to
+ *   "direct" server-side if the caller doesn't send one - old rows and old
+ *   frontend requests are unaffected.
+ *
+ *   user_type: optional organisational lead classification, one of
+ *   personal | business | estate_hoa | managing_agent | security_company |
+ *   other_organisation, or blank if not supplied/not recognised.
  *
  * Marketing tab:
  *   timestamp | phone | email | marketing_consent | consent_version
@@ -62,11 +71,13 @@ export async function appendCheckRow(row) {
     row.message,
     row.consentVersion || "",
     row.ip || "",
+    row.source || "direct",
+    row.userType || "",
   ]];
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: process.env.GOOGLE_SHEET_ID,
-    range: "Checks!A:K",
+    range: "Checks!A:M",
     valueInputOption: "RAW",
     insertDataOption: "INSERT_ROWS",
     requestBody: { values },
