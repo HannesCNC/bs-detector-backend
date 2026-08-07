@@ -130,7 +130,16 @@ app.post(
       const verification = await verifyPayFastNotification(fields, req.rawBody);
 
       if (!verification.valid) {
-        console.warn("Rejected PayFast ITN:", verification.reason, fields);
+        // Single JSON.stringify call -> one clean log line, not a multi-line
+        // node inspect dump that can get fragmented/reordered by Railway's
+        // log capture. Debug info (computed vs received signature, exact
+        // param string used) is included so a mismatch can be diagnosed
+        // directly from this one line without needing to reproduce it.
+        console.warn("Rejected PayFast ITN:", JSON.stringify({
+          reason: verification.reason,
+          debug: verification.debug || null,
+          receivedFields: fields,
+        }));
         return res.sendStatus(200);
       }
 
