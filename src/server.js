@@ -3,7 +3,7 @@ import express from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
 import { runPublicSearch } from "./search.js";
-import { assess } from "./anthropic.js";
+import { assess, validateImageInput } from "./anthropic.js";
 import {
   appendCheckRow,
   appendMarketingConsent,
@@ -27,7 +27,7 @@ import { applyPromoCode } from "./promo.js";
 
 const app = express();
 app.set("trust proxy", 1); // Railway sits behind a proxy; needed for express-rate-limit and accurate client IPs
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "8mb" })); // raised from 2mb to fit a base64-encoded phone photo of a quote/invoice
 
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
@@ -339,6 +339,7 @@ app.post("/api/check", async (req, res) => {
       company,
       town,
       phone,
+      subjectPhone,
       email,
       website,
       pastedText,
@@ -346,10 +347,19 @@ app.post("/api/check", async (req, res) => {
       marketingConsent,
       source,
       userType,
+      imageBase64,
+      imageMediaType,
     } = req.body || {};
 
     if (!name || !phone) {
       return res.status(400).json({ error: "validation_error", message: "Name and a verified phone number are required." });
+    }
+
+    // Validate the image BEFORE touching any allowance - a bad/oversized
+    // image should never cost the user a check.
+    const imageValidation = validateImageInput({ imageBase64, imageMediaType });
+    if (!imageValidation.valid) {
+      return res.status(400).json({ error: "validation_error", message: imageValidation.error });
     }
 
     const resolvedSource = (typeof source === "string" && source.trim()) ? source.trim().toLowerCase() : "direct";
@@ -380,7 +390,15 @@ app.post("/api/check", async (req, res) => {
     try {
       ({ generalResults, submittedLink } = await runPublicSearch({ name, company, town, website }));
       result = await assess({
-        name, company, town, phone, website, pastedText, reason, searchResults: generalResults, submittedLink,
+        // NOTE: intentionally passing subjectPhone here, NOT phone. `phone`
+        // is the identity/metering key for whoever is running the check -
+        // it has nothing to do with the business being investigated, and
+        // was previously (incorrectly) fed into the assessment prompt as if
+        // it were information about the subject. subjectPhone is the
+        // business/contractor's own number, if the user has and supplied it.
+        name, company, town, subjectPhone, website, pastedText, reason, searchResults: generalResults, submittedLink,
+        imageBase64: imageValidation.present ? imageBase64 : undefined,
+        imageMediaType: imageValidation.present ? imageMediaType : undefined,
       });
     } catch (scanErr) {
       console.error("Error running scan (search/assess) in /api/check:", scanErr);
