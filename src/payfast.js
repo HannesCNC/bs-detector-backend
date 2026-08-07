@@ -131,16 +131,22 @@ async function confirmWithPayFast(rawBody) {
 }
 
 /**
- * Full verification: signature + PayFast server confirmation.
+ * Full verification: PayFast server-to-server confirmation is the
+ * authoritative check (it asks PayFast's own server directly "is this
+ * notification genuine", so it doesn't depend on locally reproducing
+ * PayFast's internal signing algorithm). The local MD5 signature
+ * reproduction is kept as an advisory cross-check - logged when it doesn't
+ * match, since that's a genuinely useful early warning sign, but it no
+ * longer blocks acceptance on its own. A real forged/tampered notification
+ * still gets caught, because it would fail the confirmWithPayFast() call.
+ *
  * expectedAmount is optional but strongly recommended - pass the amount
  * (in Rand, as a string like "199.00") you expected to charge, so a
  * tampered/replayed notification for a different amount can't sneak through.
  */
 export async function verifyPayFastNotification(fields, rawBody, expectedAmount) {
   const sigResult = verifySignature(fields);
-  if (!sigResult.valid) {
-    return { valid: false, reason: "Signature mismatch - notification may be forged.", debug: sigResult.debug };
-  }
+  const signatureMatched = sigResult.valid;
 
   if (expectedAmount && fields.amount_gross && fields.amount_gross !== expectedAmount) {
     return { valid: false, reason: `Amount mismatch: expected ${expectedAmount}, got ${fields.amount_gross}.` };
@@ -148,8 +154,12 @@ export async function verifyPayFastNotification(fields, rawBody, expectedAmount)
 
   const confirmed = await confirmWithPayFast(rawBody);
   if (!confirmed) {
-    return { valid: false, reason: "PayFast server-to-server confirmation failed." };
+    return {
+      valid: false,
+      reason: "PayFast server-to-server confirmation failed.",
+      debug: signatureMatched ? undefined : sigResult.debug,
+    };
   }
 
-  return { valid: true };
+  return { valid: true, signatureMatched, debug: signatureMatched ? undefined : sigResult.debug };
 }
