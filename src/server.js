@@ -4,7 +4,24 @@ import cors from "cors";
 import rateLimit from "express-rate-limit";
 import { runPublicSearch } from "./search.js";
 import { assess } from "./anthropic.js";
-import { appendCheckRow, appendMarketingConsent, countChecksThisMonth, recordSubscriptionEvent, getExtraScansThisMonth, getExtraSummaryUnlocksThisMonth, isSubscribedThisMonth } from "./sheets.js";
+import {
+  appendCheckRow,
+  appendMarketingConsent,
+  countChecksThisMonth,
+  recordSubscriptionEvent,
+  getExtraScansThisMonth,
+  getExtraSummaryUnlocksThisMonth,
+  isSubscribedThisMonth,
+  getCreditPurchaseByPaymentId,
+  appendCreditPurchase,
+  getPaidCreditsPurchasedTotal,
+  getPaidCreditsUsedTotal,
+  getPromoChecksUsedThisMonth,
+  getFreeChecksUsedThisMonth,
+  appendToolEvent,
+  hashIp,
+  summarizeUserAgent,
+} from "./sheets.js";
 import { verifyPayFastNotification, buildCheckoutFields } from "./payfast.js";
 import { applyPromoCode } from "./promo.js";
 
@@ -21,9 +38,6 @@ app.use(cors({
   origin: allowedOrigins.length ? allowedOrigins : true,
 }));
 
-// Values accepted for the optional userType field (RichLab organisational
-// lead classification). Anything else submitted is silently ignored rather
-// than rejected, so this stays a non-breaking, optional field.
 const ALLOWED_USER_TYPES = [
   "personal",
   "business",
@@ -33,9 +47,17 @@ const ALLOWED_USER_TYPES = [
   "other_organisation",
 ];
 
-// Basic bot/abuse throttle on top of the per-phone monthly cap below.
-// Custom handler so a rate-limit hit returns clean, frontend-friendly JSON
-// instead of the default plain-text response.
+// Anonymous funnel events from the RichLab quick advert checker. Deliberately
+// a small closed allowlist - anything else is rejected, not just ignored.
+const ALLOWED_EVENTS = [
+  "quick_check_started",
+  "quick_check_completed",
+  "business_check_clicked",
+  "business_check_submitted",
+];
+
+const MAX_EVENT_FIELD_LENGTH = 120; // "accept only small strings" per spec - generous enough for any real campaign/session id, small enough to block abuse
+
 const limiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
@@ -51,9 +73,45 @@ const limiter = rateLimit({
 app.use("/api/", limiter);
 
 const FREE_SCANS_PER_MONTH = Number(process.env.FREE_SCANS_PER_MONTH || 5);
+const CHECK_BUNDLE_PRICE_ZAR = Number(process.env.CHECK_BUNDLE_PRICE_ZAR || 100);
+const CHECK_BUNDLE_QUANTITY = Number(process.env.CHECK_BUNDLE_QUANTITY || 25);
 const CONSENT_VERSION = "v1.0-2026-07-24";
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+/**
+ * Works out a phone's current balance across all three allowance types and,
+ * per the agreed priority order, which one the NEXT check would draw from.
+ * Read-only - callable freely from /api/check-balance without side effects.
+ */
+async function getAllowance(phone) {
+  const [purchasedTotal, paidUsedTotal, promoGrantedThisMonth, promoUsedThisMonth, freeUsedThisMonth] = await Promise.all([
+    getPaidCreditsPurchasedTotal(phone),
+    getPaidCreditsUsedTotal(phone),
+    getExtraScansThisMonth(phone),
+    getPromoChecksUsedThisMonth(phone),
+    getFreeChecksUsedThisMonth(phone),
+  ]);
+
+  const paidCreditsRemaining = Math.max(0, purchasedTotal - paidUsedTotal);
+  const promoChecksRemaining = Math.max(0, promoGrantedThisMonth - promoUsedThisMonth);
+  const freeChecksRemaining = Math.max(0, FREE_SCANS_PER_MONTH - freeUsedThisMonth);
+
+  return {
+    freeChecksRemaining,
+    paidCreditsRemaining,
+    promoChecksRemaining,
+    totalChecksAvailable: freeChecksRemaining + paidCreditsRemaining + promoChecksRemaining,
+  };
+}
+
+/** Priority order: paid credits, then promo credits, then the monthly free allowance. */
+function pickCreditSource(allowance) {
+  if (allowance.paidCreditsRemaining > 0) return "paid";
+  if (allowance.promoChecksRemaining > 0) return "promo";
+  if (allowance.freeChecksRemaining > 0) return "free";
+  return null;
+}
 
 // PayFast sends its ITN as application/x-www-form-urlencoded. We need the
 // EXACT raw body (not re-encoded by a parser) to pass back to PayFast's own
@@ -67,26 +125,38 @@ app.post(
     },
   }),
   async (req, res) => {
-    // Always respond 200 quickly - PayFast retries if it doesn't get one.
-    // We do the actual verification after responding is not safe though,
-    // since we must not act on unverified data - so we verify first, but
-    // keep it fast (signature check is instant; the PayFast confirmation
-    // call is the only network round-trip).
     try {
       const fields = req.body || {};
       const verification = await verifyPayFastNotification(fields, req.rawBody);
 
       if (!verification.valid) {
         console.warn("Rejected PayFast ITN:", verification.reason, fields);
-        // Still return 200 so PayFast doesn't endlessly retry a forged/bad
-        // notification, but we never mark anything as paid.
         return res.sendStatus(200);
       }
 
-      // Genuine, verified payment notification - record it.
-      // custom_str1 is where we'll pass the user's phone number when the
-      // checkout is initiated (front-end/checkout-initiation piece not yet
-      // built - this endpoint currently only handles the receiving side).
+      const isCreditBundle = fields.custom_str2 === "credit_bundle";
+
+      if (isCreditBundle) {
+        // Only ever grant credits for a COMPLETE payment, and only once per
+        // pf_payment_id - PayFast can and does resend ITNs, so this dedup
+        // check is what stops a resend from doubling someone's balance.
+        if ((fields.payment_status || "").trim().toUpperCase() === "COMPLETE") {
+          const already = await getCreditPurchaseByPaymentId(fields.pf_payment_id);
+          if (!already) {
+            await appendCreditPurchase({
+              timestamp: new Date().toISOString(),
+              phone: fields.custom_str1 || "",
+              creditsGranted: CHECK_BUNDLE_QUANTITY,
+              pfPaymentId: fields.pf_payment_id || "",
+              amountGross: fields.amount_gross || "",
+              product: "check_bundle_25",
+            });
+          }
+        }
+        return res.sendStatus(200);
+      }
+
+      // Legacy recurring-subscription path - unchanged behaviour.
       await recordSubscriptionEvent({
         timestamp: new Date().toISOString(),
         phone: fields.custom_str1 || "",
@@ -100,8 +170,6 @@ app.post(
       return res.sendStatus(200);
     } catch (err) {
       console.error("Error handling PayFast ITN:", err);
-      // Return 200 anyway - a 500 here just causes PayFast to hammer retries
-      // for an error that's on our side, not something re-sending will fix.
       return res.sendStatus(200);
     }
   }
@@ -141,7 +209,92 @@ app.post("/api/create-checkout", (req, res) => {
     return res.json({ fields, processUrl });
   } catch (err) {
     console.error("Error in /api/create-checkout:", err);
-    return res.status(500).json({ error: "server_error", message: "Could not start checkout. Please try again shortly." });
+    return res.status(500).json({ error: "payment_error", message: "Could not start checkout. Please try again shortly." });
+  }
+});
+
+// Dedicated checkout for the Business Check credit bundle (25 checks / R100
+// by default). Kept as its own endpoint rather than overloading
+// /api/create-checkout, since the two products have different amounts,
+// item names, and post-payment handling (credits vs a subscription flag).
+app.post("/api/create-bundle-checkout", (req, res) => {
+  try {
+    const { phone } = req.body || {};
+    if (!phone) {
+      return res.status(400).json({ error: "validation_error", message: "A phone number is required to start checkout." });
+    }
+
+    const backendUrl = `https://${req.get("host")}`;
+    const { fields, processUrl } = buildCheckoutFields({
+      phone,
+      amount: CHECK_BUNDLE_PRICE_ZAR,
+      itemName: `Business Check bundle (${CHECK_BUNDLE_QUANTITY} checks)`,
+      returnUrl: process.env.CHECKOUT_RETURN_URL || "https://hannescnc.github.io/bs-detector-backend/",
+      cancelUrl: process.env.CHECKOUT_CANCEL_URL || "https://hannescnc.github.io/bs-detector-backend/",
+      notifyUrl: `${backendUrl}/webhooks/payfast-itn`,
+      productTag: "credit_bundle",
+    });
+
+    return res.json({ fields, processUrl, bundleQuantity: CHECK_BUNDLE_QUANTITY, bundlePriceZar: CHECK_BUNDLE_PRICE_ZAR });
+  } catch (err) {
+    console.error("Error in /api/create-bundle-checkout:", err);
+    return res.status(500).json({ error: "payment_error", message: "Could not start checkout. Please try again shortly." });
+  }
+});
+
+// Lets the frontend show "X checks remaining" without submitting a check.
+app.post("/api/check-balance", async (req, res) => {
+  try {
+    const { phone } = req.body || {};
+    if (!phone) {
+      return res.status(400).json({ error: "validation_error", message: "A phone number is required." });
+    }
+
+    const allowance = await getAllowance(phone);
+    const allowanceType = pickCreditSource(allowance) || "none";
+
+    return res.json({ ...allowance, allowanceType });
+  } catch (err) {
+    console.error("Error in /api/check-balance:", err);
+    return res.status(500).json({ error: "server_error", message: "Could not check your balance right now. Please try again shortly." });
+  }
+});
+
+// Anonymous, unlimited funnel-tracking endpoint for the RichLab quick advert
+// checker. No personal data, no advert content - just enough to see how the
+// funnel is performing. Rejects anything outside a small fixed allowlist.
+app.post("/api/track-event", async (req, res) => {
+  try {
+    const { event, source, campaign, page, sessionId } = req.body || {};
+
+    if (!ALLOWED_EVENTS.includes(event)) {
+      return res.status(400).json({ error: "validation_error", message: "Unrecognised event name." });
+    }
+
+    const fields = { source, campaign, page, sessionId };
+    for (const [key, value] of Object.entries(fields)) {
+      if (value !== undefined && (typeof value !== "string" || value.length > MAX_EVENT_FIELD_LENGTH)) {
+        return res.status(400).json({ error: "validation_error", message: `Invalid ${key}.` });
+      }
+    }
+
+    const ip = req.headers["x-forwarded-for"]?.split(",")[0] || req.socket.remoteAddress;
+
+    await appendToolEvent({
+      timestamp: new Date().toISOString(),
+      event,
+      source: source || "richlab",
+      campaign: campaign || "",
+      page: page || "",
+      sessionId: sessionId || "",
+      ipHash: hashIp(ip),
+      userAgentSummary: summarizeUserAgent(req.headers["user-agent"]),
+    });
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("Error in /api/track-event:", err);
+    return res.status(500).json({ success: false, error: "server_error", message: "Could not record that event." });
   }
 });
 
@@ -165,29 +318,30 @@ app.post("/api/check", async (req, res) => {
       return res.status(400).json({ error: "validation_error", message: "Name and a verified phone number are required." });
     }
 
-    // Optional, non-breaking fields. Any caller that omits them (the
-    // existing Scammer Scan frontend) behaves exactly as before.
     const resolvedSource = (typeof source === "string" && source.trim()) ? source.trim().toLowerCase() : "direct";
     const resolvedUserType = (typeof userType === "string" && ALLOWED_USER_TYPES.includes(userType.trim().toLowerCase()))
       ? userType.trim().toLowerCase()
       : "";
 
-    // --- Free tier enforcement (base allowance + any promo-granted extra scans) ---
-    const usedThisMonth = await countChecksThisMonth(phone);
-    const extraScans = await getExtraScansThisMonth(phone);
-    const totalAllowance = FREE_SCANS_PER_MONTH + extraScans;
-    if (usedThisMonth >= totalAllowance) {
-      return res.status(429).json({
-        error: "free_tier_exceeded",
-        message: `You've used your ${totalAllowance} available scans this month. Upgrade to a paid plan or enter a promo code for more checks.`,
+    // --- Work out which allowance (if any) this check would draw from ---
+    const allowance = await getAllowance(phone);
+    const creditSource = pickCreditSource(allowance);
+
+    if (!creditSource) {
+      return res.status(402).json({
+        error: "no_credits_remaining",
+        message: `Your ${FREE_SCANS_PER_MONTH} free Business Checks have been used. Unlock ${CHECK_BUNDLE_QUANTITY} more checks for R${CHECK_BUNDLE_PRICE_ZAR}.`,
+        bundlePriceZar: CHECK_BUNDLE_PRICE_ZAR,
+        bundleQuantity: CHECK_BUNDLE_QUANTITY,
       });
     }
 
     // --- Run the actual scan ---
     // Isolated try/catch: failures here are almost always an upstream
     // dependency (search provider or the assessment call) rather than a bug
-    // in our own logic, so they get a distinct 503 "temporarily overloaded"
-    // response instead of the generic 500 used below.
+    // in our own logic, so they get a distinct 503 response. Crucially,
+    // nothing is deducted/logged if this fails - a failed attempt never
+    // costs the user a check.
     let generalResults, submittedLink, result;
     try {
       ({ generalResults, submittedLink } = await runPublicSearch({ name, company, town, website }));
@@ -206,13 +360,10 @@ app.post("/api/check", async (req, res) => {
     const extraSummaryUnlocks = await getExtraSummaryUnlocksThisMonth(phone);
     const BASE_FREE_SUMMARIES = Number(process.env.FREE_DETAILED_SUMMARIES_PER_MONTH || 5);
     const summaryAllowance = BASE_FREE_SUMMARIES + extraSummaryUnlocks;
-    // usedThisMonth is the count BEFORE this request - so this check is the
-    // (usedThisMonth + 1)th of the month. It gets the full summary for free
-    // if it falls within the base+promo allowance, or if the user is a paid
-    // subscriber (who always gets it regardless of count).
-    const includeDetailedSummary = isPaidSubscriber || usedThisMonth < summaryAllowance;
+    const freeSummariesUsedThisMonth = await getFreeChecksUsedThisMonth(phone); // detailed-summary allowance still tracks off free-tier usage count, unchanged from before
+    const includeDetailedSummary = isPaidSubscriber || freeSummariesUsedThisMonth < summaryAllowance;
 
-    // --- Log to Sheets (audit trail + usage counting) ---
+    // --- Log to Sheets (this write IS the deduction - see credit_source) ---
     const ip = req.headers["x-forwarded-for"]?.split(",")[0] || req.socket.remoteAddress;
     await appendCheckRow({
       timestamp: new Date().toISOString(),
@@ -228,10 +379,9 @@ app.post("/api/check", async (req, res) => {
       ip,
       source: resolvedSource,
       userType: resolvedUserType,
+      creditSource,
     });
 
-    // Marketing consent is stored separately and only if explicitly ticked -
-    // never inferred from the service consent, per the framework's requirement.
     if (typeof marketingConsent === "boolean") {
       await appendMarketingConsent({
         timestamp: new Date().toISOString(),
@@ -242,10 +392,31 @@ app.post("/api/check", async (req, res) => {
       });
     }
 
+    // Backend-side automatic funnel logging - preferred over relying on the
+    // frontend to send this separately, since it can't be missed or double-fired.
+    try {
+      await appendToolEvent({
+        timestamp: new Date().toISOString(),
+        event: "business_check_submitted",
+        source: resolvedSource,
+        campaign: "",
+        page: "check-business",
+        sessionId: "",
+        ipHash: hashIp(ip),
+        userAgentSummary: summarizeUserAgent(req.headers["user-agent"]),
+      });
+    } catch (eventErr) {
+      // Never let funnel-tracking failure affect the actual check response.
+      console.error("Error logging business_check_submitted event:", eventErr);
+    }
+
+    const remainingAfterThisCheck = Math.max(0, allowance.totalChecksAvailable - 1);
+
     return res.json({
       status: result.status,
       message: result.message,
-      scansRemaining: Math.max(0, totalAllowance - usedThisMonth - 1),
+      scansRemaining: remainingAfterThisCheck,
+      creditSource,
       disclaimer: "This is a limited public-source scan based on the information supplied. It is not a formal background check or legal clearance.",
       isPaidSubscriber,
       detailedSummary: includeDetailedSummary ? result.detailedSummary : null,
