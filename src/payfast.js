@@ -24,6 +24,28 @@ const PAYFAST_PROCESS_URL = process.env.PAYFAST_SANDBOX === "true"
   : "https://www.payfast.co.za/eng/process";
 
 /**
+ * PayFast is a PHP system and computes its own side of the signature using
+ * PHP's urlencode() rules - which is NOT the same as JavaScript's
+ * encodeURIComponent(). Specifically, urlencode() also escapes ! ' ( ) *
+ * (encodeURIComponent leaves those six characters alone) and uses "+" for
+ * spaces rather than %20. Any field value containing one of those characters
+ * - e.g. an item_name like "Business Check bundle (25 checks)" - would
+ * previously produce a signature that looked fine on our side but didn't
+ * match what PayFast calculated, causing "Generated signature does not
+ * match submitted signature." This function replicates PHP's urlencode()
+ * exactly so both sides always agree.
+ */
+function pfEncode(value) {
+  return encodeURIComponent(value)
+    .replace(/%20/g, "+")
+    .replace(/!/g, "%21")
+    .replace(/'/g, "%27")
+    .replace(/\(/g, "%28")
+    .replace(/\)/g, "%29")
+    .replace(/\*/g, "%2A");
+}
+
+/**
  * Builds the signed field set for a PayFast checkout. The front-end posts
  * these fields (as a plain HTML form, not fetch/JSON - PayFast expects a
  * real form submission that redirects the browser) to processUrl.
@@ -55,10 +77,10 @@ export function buildCheckoutFields({ phone, amount, itemName, returnUrl, cancel
   const passphrase = process.env.PAYFAST_PASSPHRASE || "";
   const paramString = Object.keys(fields)
     .filter((key) => fields[key] !== undefined && fields[key] !== "")
-    .map((key) => `${key}=${encodeURIComponent(fields[key]).replace(/%20/g, "+")}`)
+    .map((key) => `${key}=${pfEncode(fields[key])}`)
     .join("&");
   const withPassphrase = passphrase
-    ? `${paramString}&passphrase=${encodeURIComponent(passphrase).replace(/%20/g, "+")}`
+    ? `${paramString}&passphrase=${pfEncode(passphrase)}`
     : paramString;
 
   fields.signature = crypto.createHash("md5").update(withPassphrase).digest("hex");
@@ -80,11 +102,11 @@ function verifySignature(fields) {
 
   const paramString = Object.keys(rest)
     .filter((key) => rest[key] !== undefined && rest[key] !== "")
-    .map((key) => `${key}=${encodeURIComponent(rest[key]).replace(/%20/g, "+")}`)
+    .map((key) => `${key}=${pfEncode(rest[key])}`)
     .join("&");
 
   const withPassphrase = passphrase
-    ? `${paramString}&passphrase=${encodeURIComponent(passphrase).replace(/%20/g, "+")}`
+    ? `${paramString}&passphrase=${pfEncode(passphrase)}`
     : paramString;
 
   const computed = crypto.createHash("md5").update(withPassphrase).digest("hex");
