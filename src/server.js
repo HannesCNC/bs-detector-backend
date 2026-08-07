@@ -129,6 +129,12 @@ app.post(
       const fields = req.body || {};
       const verification = await verifyPayFastNotification(fields, req.rawBody);
 
+      if (verification.valid && verification.signatureMatched === false) {
+        console.warn("PayFast ITN accepted via server confirmation, but local signature check did not match (advisory only, not blocking).", JSON.stringify({
+          debug: verification.debug,
+        }));
+      }
+
       if (!verification.valid) {
         // Single JSON.stringify call -> one clean log line, not a multi-line
         // node inspect dump that can get fragmented/reordered by Railway's
