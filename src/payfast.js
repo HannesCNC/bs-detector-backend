@@ -26,14 +26,8 @@ const PAYFAST_PROCESS_URL = process.env.PAYFAST_SANDBOX === "true"
 /**
  * PayFast is a PHP system and computes its own side of the signature using
  * PHP's urlencode() rules - which is NOT the same as JavaScript's
- * encodeURIComponent(). Specifically, urlencode() also escapes ! ' ( ) *
- * (encodeURIComponent leaves those six characters alone) and uses "+" for
- * spaces rather than %20. Any field value containing one of those characters
- * - e.g. an item_name like "Business Check bundle (25 checks)" - would
- * previously produce a signature that looked fine on our side but didn't
- * match what PayFast calculated, causing "Generated signature does not
- * match submitted signature." This function replicates PHP's urlencode()
- * exactly so both sides always agree.
+ * encodeURIComponent(). urlencode() also escapes ! ' ( ) * (encodeURIComponent
+ * leaves those six characters alone) and uses "+" for spaces rather than %20.
  */
 function pfEncode(value) {
   return encodeURIComponent(value)
@@ -43,6 +37,14 @@ function pfEncode(value) {
     .replace(/\(/g, "%28")
     .replace(/\)/g, "%29")
     .replace(/\*/g, "%2A");
+}
+
+function buildParamString(fields, passphrase) {
+  const paramString = Object.keys(fields)
+    .filter((key) => fields[key] !== undefined && fields[key] !== "")
+    .map((key) => `${key}=${pfEncode(fields[key])}`)
+    .join("&");
+  return passphrase ? `${paramString}&passphrase=${pfEncode(passphrase)}` : paramString;
 }
 
 /**
@@ -56,7 +58,6 @@ function pfEncode(value) {
  * custom_str2 is an optional product tag, e.g. "credit_bundle" - lets the
  * ITN webhook tell a Business Check bundle purchase apart from the legacy
  * recurring-subscriber purchase, which has no custom_str2 (undefined/blank).
- * Existing subscription checkouts are unaffected since this is optional.
  */
 export function buildCheckoutFields({ phone, amount, itemName, returnUrl, cancelUrl, notifyUrl, productTag }) {
   const fields = {
@@ -75,14 +76,7 @@ export function buildCheckoutFields({ phone, amount, itemName, returnUrl, cancel
   }
 
   const passphrase = process.env.PAYFAST_PASSPHRASE || "";
-  const paramString = Object.keys(fields)
-    .filter((key) => fields[key] !== undefined && fields[key] !== "")
-    .map((key) => `${key}=${pfEncode(fields[key])}`)
-    .join("&");
-  const withPassphrase = passphrase
-    ? `${paramString}&passphrase=${pfEncode(passphrase)}`
-    : paramString;
-
+  const withPassphrase = buildParamString(fields, passphrase);
   fields.signature = crypto.createHash("md5").update(withPassphrase).digest("hex");
 
   return { fields, processUrl: PAYFAST_PROCESS_URL };
@@ -90,27 +84,28 @@ export function buildCheckoutFields({ phone, amount, itemName, returnUrl, cancel
 
 /**
  * Recomputes the MD5 signature from the posted fields and compares it to
- * the "signature" field PayFast included. If PAYFAST_PASSPHRASE is set
- * (recommended - configured in your PayFast merchant dashboard), it must
- * be included in the hash too, exactly as PayFast does on their side.
+ * the "signature" field PayFast included. Returns rich debug info alongside
+ * the boolean result so a mismatch can be diagnosed from logs without
+ * needing to reproduce it separately - this was added after a live signature
+ * mismatch that was hard to pin down from a plain true/false result.
  */
 function verifySignature(fields) {
   const { signature, ...rest } = fields;
-  if (!signature) return false;
+  if (!signature) return { valid: false, reason: "No signature field present in notification." };
 
   const passphrase = process.env.PAYFAST_PASSPHRASE || "";
+  const paramString = buildParamString(rest, passphrase);
+  const computed = crypto.createHash("md5").update(paramString).digest("hex");
 
-  const paramString = Object.keys(rest)
-    .filter((key) => rest[key] !== undefined && rest[key] !== "")
-    .map((key) => `${key}=${pfEncode(rest[key])}`)
-    .join("&");
-
-  const withPassphrase = passphrase
-    ? `${paramString}&passphrase=${pfEncode(passphrase)}`
-    : paramString;
-
-  const computed = crypto.createHash("md5").update(withPassphrase).digest("hex");
-  return computed === signature;
+  return {
+    valid: computed === signature,
+    debug: {
+      receivedSignature: signature,
+      computedSignature: computed,
+      paramStringUsed: paramString,
+      passphraseWasSet: Boolean(passphrase),
+    },
+  };
 }
 
 /**
@@ -142,8 +137,9 @@ async function confirmWithPayFast(rawBody) {
  * tampered/replayed notification for a different amount can't sneak through.
  */
 export async function verifyPayFastNotification(fields, rawBody, expectedAmount) {
-  if (!verifySignature(fields)) {
-    return { valid: false, reason: "Signature mismatch - notification may be forged." };
+  const sigResult = verifySignature(fields);
+  if (!sigResult.valid) {
+    return { valid: false, reason: "Signature mismatch - notification may be forged.", debug: sigResult.debug };
   }
 
   if (expectedAmount && fields.amount_gross && fields.amount_gross !== expectedAmount) {
