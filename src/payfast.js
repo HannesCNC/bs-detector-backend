@@ -3,9 +3,9 @@ import crypto from "crypto";
 /**
  * PayFast sends a server-to-server POST ("ITN" - Instant Transaction
  * Notification) whenever a payment's status changes. This is the ONLY
- * signal that should ever be trusted to mark a subscription as paid -
- * never the browser redirect PayFast sends the user to afterwards, since
- * a user could just visit that "success" URL directly without paying.
+ * signal that should ever be trusted to mark a payment as paid - never the
+ * browser redirect PayFast sends the user to afterwards, since a user could
+ * just visit that "success" URL directly without paying.
  *
  * This module implements PayFast's documented ITN validation steps:
  *   1. Verify the signature (MD5 hash) matches what PayFast would have sent
@@ -29,9 +29,14 @@ const PAYFAST_PROCESS_URL = process.env.PAYFAST_SANDBOX === "true"
  * real form submission that redirects the browser) to processUrl.
  *
  * custom_str1 carries the phone number through so the ITN webhook later
- * knows which phone number to mark as subscribed.
+ * knows which phone number the payment belongs to.
+ *
+ * custom_str2 is an optional product tag, e.g. "credit_bundle" - lets the
+ * ITN webhook tell a Business Check bundle purchase apart from the legacy
+ * recurring-subscriber purchase, which has no custom_str2 (undefined/blank).
+ * Existing subscription checkouts are unaffected since this is optional.
  */
-export function buildCheckoutFields({ phone, amount, itemName, returnUrl, cancelUrl, notifyUrl }) {
+export function buildCheckoutFields({ phone, amount, itemName, returnUrl, cancelUrl, notifyUrl, productTag }) {
   const fields = {
     merchant_id: process.env.PAYFAST_MERCHANT_ID,
     merchant_key: process.env.PAYFAST_MERCHANT_KEY,
@@ -42,6 +47,10 @@ export function buildCheckoutFields({ phone, amount, itemName, returnUrl, cancel
     item_name: itemName,
     custom_str1: phone,
   };
+
+  if (productTag) {
+    fields.custom_str2 = productTag;
+  }
 
   const passphrase = process.env.PAYFAST_PASSPHRASE || "";
   const paramString = Object.keys(fields)
@@ -107,9 +116,8 @@ async function confirmWithPayFast(rawBody) {
 /**
  * Full verification: signature + PayFast server confirmation.
  * expectedAmount is optional but strongly recommended - pass the amount
- * (in Rand, as a string like "199.00") you expected to charge for this
- * subscription tier, so a tampered/replayed notification for a different
- * amount can't sneak through.
+ * (in Rand, as a string like "199.00") you expected to charge, so a
+ * tampered/replayed notification for a different amount can't sneak through.
  */
 export async function verifyPayFastNotification(fields, rawBody, expectedAmount) {
   if (!verifySignature(fields)) {
