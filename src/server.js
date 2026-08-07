@@ -58,6 +58,24 @@ const ALLOWED_EVENTS = [
 
 const MAX_EVENT_FIELD_LENGTH = 120; // "accept only small strings" per spec - generous enough for any real campaign/session id, small enough to block abuse
 
+// Cheap sanity checks for /api/check - see the usage site for what these
+// deliberately do and don't catch.
+function isPlausibleName(name) {
+  if (typeof name !== "string") return false;
+  const trimmed = name.trim();
+  if (trimmed.length < 2 || trimmed.length > 100) return false;
+  return /[a-zA-Z]/.test(trimmed);
+}
+
+function isPlausiblePhone(phone) {
+  if (typeof phone !== "string") return false;
+  const digitsOnly = phone.replace(/[^\d]/g, "");
+  // 8-15 digits covers real-world phone numbers internationally (SA numbers
+  // are 10 digits locally, 11 with country code) without being so loose it
+  // accepts arbitrary short digit strings.
+  return digitsOnly.length >= 8 && digitsOnly.length <= 15;
+}
+
 const limiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
@@ -349,10 +367,23 @@ app.post("/api/check", async (req, res) => {
       userType,
       imageBase64,
       imageMediaType,
+      consentGiven,
     } = req.body || {};
 
-    if (!name || !phone) {
-      return res.status(400).json({ error: "validation_error", message: "Name and a verified phone number are required." });
+    // Cheap, honest validation: this catches empty-effort submissions
+    // (blank, symbols-only, too short, no digits) - it will NOT catch a
+    // plausible-looking fake word like "asdf", since that's indistinguishable
+    // from a real short name/number without a dictionary lookup, which risks
+    // rejecting genuine names. The rate limiter and monthly free-check cap
+    // are what actually bound worst-case abuse cost beyond this.
+    if (!name || !isPlausibleName(name)) {
+      return res.status(400).json({ error: "validation_error", message: "Please enter a name to check." });
+    }
+    if (!phone || !isPlausiblePhone(phone)) {
+      return res.status(400).json({ error: "validation_error", message: "Please enter a valid phone number." });
+    }
+    if (consentGiven !== true) {
+      return res.status(400).json({ error: "validation_error", message: "Please confirm the consent checkbox before running a check." });
     }
 
     // Validate the image BEFORE touching any allowance - a bad/oversized
