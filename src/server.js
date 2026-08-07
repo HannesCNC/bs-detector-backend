@@ -144,14 +144,26 @@ app.post(
       }
 
       const isCreditBundle = fields.custom_str2 === "credit_bundle";
+      console.log("PayFast ITN accepted (signature valid).", JSON.stringify({
+        pfPaymentId: fields.pf_payment_id,
+        paymentStatus: fields.payment_status,
+        customStr2Received: fields.custom_str2 ?? null,
+        treatedAsCreditBundle: isCreditBundle,
+      }));
 
       if (isCreditBundle) {
         // Only ever grant credits for a COMPLETE payment, and only once per
         // pf_payment_id - PayFast can and does resend ITNs, so this dedup
         // check is what stops a resend from doubling someone's balance.
-        if ((fields.payment_status || "").trim().toUpperCase() === "COMPLETE") {
+        const paymentStatus = (fields.payment_status || "").trim().toUpperCase();
+
+        if (paymentStatus === "COMPLETE") {
           const already = await getCreditPurchaseByPaymentId(fields.pf_payment_id);
-          if (!already) {
+          if (already) {
+            console.log("Bundle ITN: credits already granted for this pf_payment_id, skipping.", JSON.stringify({
+              pfPaymentId: fields.pf_payment_id, phone: fields.custom_str1,
+            }));
+          } else {
             await appendCreditPurchase({
               timestamp: new Date().toISOString(),
               phone: fields.custom_str1 || "",
@@ -160,7 +172,14 @@ app.post(
               amountGross: fields.amount_gross || "",
               product: "check_bundle_25",
             });
+            console.log("Bundle ITN: credits granted.", JSON.stringify({
+              pfPaymentId: fields.pf_payment_id, phone: fields.custom_str1, creditsGranted: CHECK_BUNDLE_QUANTITY,
+            }));
           }
+        } else {
+          console.log("Bundle ITN: received but payment_status was not COMPLETE, no credits granted.", JSON.stringify({
+            pfPaymentId: fields.pf_payment_id, phone: fields.custom_str1, paymentStatus: fields.payment_status,
+          }));
         }
         return res.sendStatus(200);
       }
